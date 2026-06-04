@@ -1,4 +1,7 @@
 # Pocket Player
+Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates like 130 USD in tokens. I haven't read anything in here.
+
+
 
 A lightweight, mobile-styled music player built with **Qt 6 Widgets** and
 **Qt Multimedia**. Targets the desktop but uses a phone-shaped, touch-friendly
