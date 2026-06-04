@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="shuffle.svg">icons/shuffle.svg</file>
+        <file alias="repeat.svg">icons/repeat.svg</file>
+        <file alias="repeat-one.svg">icons/repeat-one.svg</file>
+        <file alias="settings.svg">icons/settings.svg</file>
+        <file alias="album_icon.svg">icons/album_icon.svg</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Pocket Player
+GenericName=Music Player
+Comment=A lightweight, power-conscious music player
+Exec=mp3player
+Icon=pocketplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;Qt;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/mp4;audio/x-wav;
