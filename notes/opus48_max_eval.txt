@@ -1,0 +1,118 @@
+Pass 1 — Code quality & uniformity
+
+1. Duplicated audio-extension glob list (highest-value cleanup)
+MusicLibrary.cpp:33 (kFilters) and MainWindow.cpp:55 (kAudioGlobs) are byte-identical 21-entry lists. They will drift. Extract one kAudioGlobs into a shared
+header (e.g. alongside Track or a new AudioFormats.h) and include it in both.
+
+2. Project-name sprawl
+Six names for one app: CMake project(MobileMp3Player) (CMakeLists.txt:3), target mp3player, QApplication name "Pocket Player"/org "PocketPlayer"
+(main.cpp:12), MPRIS pocketplayer, pocketplayer.desktop, dir mp3-player. The CMake project name especially is stale. ⚠️ Don't blindly rename the QApplication
+org/app strings — they key the QSettings path and the SQLite location, so a rename orphans existing config/DB. The cosmetic ones (CMake project) are safe to
+align to "Pocket Player".
+
+3. Dead member m_duration
+MainWindow.h:132 + assigned at MainWindow.cpp:1085, never read (the seek range and total label are set directly in the same function). Remove both.
+
+4. Stale code/comments in SettingsDialog
+<QSpinBox> is included (SettingsDialog.cpp:11) and forward-declared (SettingsDialog.h:9) but no spin box exists; the class doc-comment (SettingsDialog.h:17)
+promises a "scan thread cap" UI that isn't there. Drop the include/decl and fix the comment.
+
+5. Three different tab-construction idioms in SettingsDialog
+General-tab widgets are created in the ctor body then laid out by buildGeneralTab(); the Library tab is built fully inline in the ctor
+(SettingsDialog.cpp:65-121); About is fully encapsulated in buildAboutTab(). Pick one pattern — a buildLibraryTab() to match the others reads best.
+
+6. Two near-identical time formatters
+MainWindow::formatTime (MainWindow.cpp:1090) and the file-local formatDuration (PlaylistModel.cpp:4) both do mm:ss. They even disagree on the zero case
+(formatDuration→"", formatTime→"0:00"). Consolidate into one shared helper and decide the empty-vs-zero contract deliberately.
+
+7. String-literal inconsistency
+Codebase mostly uses QStringLiteral, but formatTime uses raw QString("%1:%2") (MainWindow.cpp:1095). For a power-conscious app, QStringLiteral avoids
+re-allocating the template (matters here — it's on the per-tick path). (The two QString(...).arg(kCols) in MusicLibrary.cpp:365,374 are legitimately dynamic
+SQL — leave them.)
+
+8. Magic numbers that should be named constants
+3000 previous-restart threshold (PlayerController.cpp:163), 4000 status timeout (MainWindow.cpp:84), 220 search debounce (MainWindow.cpp:299). Contrast with
+the well-done kNarrow/kWide (MainWindow.cpp:612) and kMaxHistory (PlayerController.cpp:61). Promote for uniformity.
+
+9. "Merge only non-empty fields" implemented 3×
+PlaylistModel::updateTrack (PlaylistModel.cpp:91), PlayerController::onMetaDataChanged (PlayerController.cpp:304), and MusicLibrary::enrichMetadata SQL
+(MusicLibrary.cpp:217). The SQL one is necessarily separate, but the two Track-level copies could share a Track::mergeFrom(...) helper.
+
+---
+Pass 2 — Bugs & pitfalls
+
+1. Cold scan starves all other worker-thread queries (most impactful)
+scan() consumes the parse results in a blocking for (it = future.begin(); it != future.end(); …) loop (MusicLibrary.cpp:478) and never returns to the worker's
+event loop until the whole scan finishes. Everything else on that single worker — search() (:345), resolveArt() (:236), enrichMetadata() (:207) — is queued
+and cannot run until the scan completes. On a cold 45k-file build (your stated target) that's tens of seconds where the search box does nothing and
+now-playing cover art never resolves. Warm scans are fast, so the window is usually small — this bites the first run hardest. Fixes, cheapest→cleanest: drive
+the consume loop via a QFutureWatcher (keeps the event loop live), or give interactive queries a second worker/QThreadPool separate from the bulk scan.
+
+2. Re-tagged files keep stale cover art
+upsert updates every column except art_url on an mtime change (MusicLibrary.cpp:150-169), and resolveArt short-circuits whenever art_url is non-null and the
+cached file still exists (:250-257). So replacing a file's embedded artwork never refreshes the displayed cover. The mtime-in-cache-key in extractArt (:292)
+was clearly meant to invalidate, but the short-circuit fires first so re-extraction never happens. Fix: null out (or refresh) art_url in upsert when mtime
+changes.
+
+3. Double-clicking a tree folder both toggles expansion and enqueues it
+onTreeClicked toggles expand for dirs on single click (MainWindow.cpp:870); Qt delivers clicked before doubleClicked, so a double-click on a folder
+expands/collapses it (from the first click) and enqueues its contents (onTreeActivated, :877). Net effect: every enqueue-by-double-click also flips the folder
+open/closed. Consider only toggling on single-click for items without an enqueue action, or enqueue folders via context menu only.
+
+4. False expand-arrows on empty subdirectories
+populateNode guards the placeholder child with if (!sub.absoluteDir().isEmpty()) (MainWindow.cpp:577) — but a subdir's absoluteDir() is its parent, never
+empty, so the condition is always true. Every subdirectory shows an expand arrow even when empty; it only vanishes after the user expands it. Cosmetic, but
+the condition is plainly not doing what it looks like.
+
+5. SQLite connection "library" is never removed
+addDatabase("QSQLITE", "library") (MusicLibrary.cpp:63) with no matching removeDatabase. Benign for a process-lifetime single connection, but Qt can warn at
+teardown. Since the worker is deleteLater'd on its own thread, close + QSqlDatabase::removeDatabase("library") there. Low severity.
+
+6. Non-library files don't cache art or persist player-resolved tags (edge)
+resolveArt and enrichMetadata both … WHERE path=?; a file enqueued from the tree that has no DB row (outside the library folders, or before its first scan)
+matches 0 rows — so its art is re-extracted on every play and FFmpeg-resolved tags are never saved. Acceptable, worth knowing.
+
+7. Second-resolution mtime (very low)
+lastModified().toSecsSinceEpoch() (MusicLibrary.cpp:444) — a file rewritten within the same wall-clock second as its prior scan won't be re-parsed. Standard
+mtime-cache limitation.
+
+8. Drag-to-zero volume loses the un-mute level (minor UX)
+m_preMuteVolume is only updated by the mute button (MainWindow.cpp:472). Drag the slider to 0, then click un-mute, and it restores the last button-set value
+(default 80), not your last audible level.
+
+Verified not bugs (I checked these against Qt 6 docs because they looked risky):
+- Scan cancellation is sound — QtConcurrent::mapped futures are cancelable; in-flight results drain and ~QThreadPool waitForDone()s, so cancel()+break+return
+on shutdown (:479, MainWindow.cpp:136) is correct.
+- No symlink-loop infinite recursion — QDirIterator (:438) auto-detects and ignores symlink loops, and without FollowSymlinks it won't recurse into symlinked
+dirs anyway. The seen set also dedupes.
+- No art re-request loop — double-guarded by changed (MainWindow.cpp:1051) and the artUrl == check in setCurrentArt (PlayerController.cpp:213).
+- DB thread-affinity is correct — connection opened, used, and destroyed all on the worker thread.
+
+---
+Pass 3 — Optimization (power-conscious is the stated goal)
+
+1. upsert re-prepares its statement on every row (biggest scan win)
+MusicLibrary.cpp:152 builds and prepare()s the INSERT…ON CONFLICT afresh inside the cold-scan loop — up to 45k SQL re-parses. Hoist one prepared QSqlQuery out
+of the loop and only rebind+exec per row. Same pattern in the prune DELETE (:522), though it runs far less often.
+
+2. playRowForPath is O(n) and called several times per track change
+MainWindow.cpp:597 linear-scans the whole model with per-row QUrl compares; it's hit by highlightPlaying, onArtResolved, and the metadataResolved handler.
+With a "Play library" queue of 45k, every track advance is multiple O(45k) passes. Maintain a QHash<QString,int> (local-path→row) rebuilt in
+setTracks/appendTracks for O(1) lookups.
+
+3. Position-tick UI churn (real power cost)
+onPositionChanged (MainWindow.cpp:1076) fires sub-second during playback and every time does m_seek->setValue + m_elapsed->setText(formatTime(ms)) — a fresh
+string alloc + label repaint per tick, though the elapsed display only changes once per second. Cache the last-shown second and skip the label update when
+unchanged. (Compounds with #5 below.)
+
+4. QSettings written on every volume valueChanged
+The handler at MainWindow.cpp:112 persists playback/volume on every change — a slider drag = dozens of writes. Persist on sliderReleased (or debounce)
+instead.
+
+5. formatTime allocates its format template each call
+QString("%1:%2") (MainWindow.cpp:1095) → QStringLiteral. Trivial, but it's on the per-tick path so it pairs with #3.
+
+6. Minor: updateQueueTitle constructs a QLocale() per call (MainWindow.cpp:1021); onMetaDataChanged emits enrichTrack→DB write on every metaDataChanged (can
+fire several times per track — gate to once).
+
+Note: the 2-thread parse cap (MusicLibrary.cpp:460) is a deliberate, documented power trade-off — I'd leave it; raising it would fight the project's goal.
