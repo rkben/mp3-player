@@ -12,18 +12,21 @@
 #include <QFont>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QDir>
 
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
-                               bool restoreQueue, Theme::Mode themeMode,
-                               QString themeFile, QWidget *parent)
+                               bool restoreQueue, bool autoPlay,
+                               Theme::Mode themeMode, QString themeFile,
+                               QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("Settings"));
     setModal(true);
     setMinimumWidth(420);
+    resize(620, 520);
 
     auto *root = new QVBoxLayout(this);
     auto *tabs = new QTabWidget;
@@ -42,8 +45,13 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_themeBrowse = new QPushButton(tr("Browse…"));
     m_themeBrowse->setMinimumHeight(34);
 
-    m_restoreQueue = new QCheckBox(tr("Restore the last queue on startup"));
+    m_restoreQueue = new QCheckBox(tr("Restore last queue"));
     m_restoreQueue->setChecked(restoreQueue);
+
+    m_autoPlay = new QCheckBox(tr("Auto-play"));
+    m_autoPlay->setChecked(autoPlay);
+    m_autoPlay->setToolTip(tr("Start playback automatically when the app launches "
+                              "(respects the shuffle setting)."));
 
     tabs->addTab(buildGeneralTab(), tr("General"));
 
@@ -104,6 +112,11 @@ bool SettingsDialog::restoreQueue() const
     return m_restoreQueue->isChecked();
 }
 
+bool SettingsDialog::autoPlay() const
+{
+    return m_autoPlay->isChecked();
+}
+
 Theme::Mode SettingsDialog::themeMode() const
 {
     return Theme::Mode(m_themeCombo->currentData().toInt());
@@ -117,18 +130,30 @@ QString SettingsDialog::themeFile() const
 QWidget *SettingsDialog::buildGeneralTab()
 {
     auto *general = new QWidget;
-    auto *form = new QFormLayout(general);
-    form->setSpacing(8);
+    auto *layout = new QVBoxLayout(general);
+    layout->setSpacing(12);
 
-    form->addRow(tr("Theme:"), m_themeCombo);
+    // ---- Startup ----
+    auto *startupBox = new QGroupBox(tr("Startup"));
+    auto *startupForm = new QFormLayout(startupBox);
+    startupForm->setSpacing(8);
+    startupForm->addRow(m_restoreQueue);
+    startupForm->addRow(m_autoPlay);
+    layout->addWidget(startupBox);
+
+    // ---- Theme ----
+    auto *themeBox = new QGroupBox(tr("Theme"));
+    auto *themeForm = new QFormLayout(themeBox);
+    themeForm->setSpacing(8);
+    themeForm->addRow(tr("Theme:"), m_themeCombo);
 
     auto *fileRow = new QHBoxLayout;
     fileRow->addWidget(m_themeFileEdit, 1);
     fileRow->addWidget(m_themeBrowse);
-    form->addRow(tr("Stylesheet:"), fileRow);
+    themeForm->addRow(tr("Stylesheet:"), fileRow);
+    layout->addWidget(themeBox);
 
-    form->addRow(tr("Startup:"), m_restoreQueue);
-
+    layout->addStretch();
     return general;
 }
 

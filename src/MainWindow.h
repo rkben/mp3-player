@@ -2,6 +2,8 @@
 
 #include <QWidget>
 
+#include <functional>
+
 #include "PlaylistModel.h"   // Track (for QList<Track> signal arg)
 #include "LibraryFolder.h"
 #include "PlaylistStore.h"
@@ -75,13 +77,16 @@ private:
     QWidget *buildTrackInfoPanel();   // bottom-left: album art + track metadata
     QList<Track> tracksForPath(const QString &path) const;   // file or folder -> tracks
     QList<Track> tracksForPaths(const QStringList &paths) const;  // resolve via library
+    QStringList audioPathsForPath(const QString &path) const;    // file or folder -> paths
+    void playNow(const QList<Track> &tracks);   // replace queue, drop any active playlist
     void showTrackDetails(const Track &track);   // modal with full metadata + path
     void scheduleSearch();   // debounce, or restore library when cleared
     void showTrackInfo(const Track &track);   // populate the info panel
     void updateQueueTitle();                  // "<playlist>[ [modified]] (N)" header
     QStringList queuePaths() const;           // local file paths of the current queue
     void buildQueueMenu();                    // (re)populate the queue-actions dropdown
-    void addToPlaylistMenu(QMenu *menu, const QList<Track> &tracks);  // "Add to playlist"
+    // "Add to playlist" submenu; paths resolved lazily on click (cheap popup).
+    void addToPlaylistMenu(QMenu *menu, std::function<QStringList()> paths);
     void refreshPlaylists();                  // repopulate the Playlists tab list
     void loadPlaylist(const QString &name);   // resolve + play, set current playlist
     void setCurrentPlaylist(const QString &name, bool dirty);   // update header + persist
@@ -103,6 +108,7 @@ private:
     // is set — kept false for art/metadata refreshes so it doesn't fight the user.
     void highlightPlaying(const QUrl &url, bool scroll);
     void seedReadyQueue();   // give the player a ready queue when nothing's playing
+    void startAutoPlay();    // begin playback on launch, honouring the shuffle state
     void applyCompact(bool compact);   // narrow/mobile vs wide/desktop layout
 
     PlaylistModel *m_model;
@@ -157,5 +163,7 @@ private:
     bool m_queueDirty = false;    // queue diverged from the saved playlist
     bool m_loadingPlaylist = false;   // guard: deliberate load shouldn't flag dirty
     bool m_resumeQueue = true;    // ui/restoreQueue: repopulate the queue on launch
+    bool m_autoPlay = false;      // ui/autoPlay: start playback on launch
+    bool m_autoPlayPending = false;   // one-shot: consumed on the first libraryLoaded
     QStringList m_pendingResume;  // cached-queue paths, resolved on first libraryLoaded
 };

@@ -8,3 +8,4 @@ testdata/
 # Generated probes / fixtures (derived from a local music library)
 dates.tsv
 tests/year_cases.tsv
+notes/fixins.md

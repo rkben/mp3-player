@@ -37,6 +37,8 @@ qt_add_executable(mp3player
     src/MainWindow.h
     src/PlayerController.cpp
     src/PlayerController.h
+    src/MediaEngine.cpp
+    src/MediaEngine.h
     src/PlaylistModel.cpp
     src/PlaylistModel.h
     src/SettingsDialog.cpp

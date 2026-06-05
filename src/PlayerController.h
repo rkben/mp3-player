@@ -2,18 +2,26 @@
 
 #include <QObject>
 #include <QMediaPlayer>
+#include <QMediaMetaData>
 #include <QList>
 #include <QUrl>
 
 #include "PlaylistModel.h"   // Track
 
-class QAudioOutput;
+class MediaEngine;
+class QThread;
 
-// Owns the QMediaPlayer + QAudioOutput and an independent **play queue** — a
-// snapshot of Tracks captured when playback starts. The queue is decoupled from
-// whatever the Tracks view is currently showing, so searching/sorting/reloading
-// the library doesn't disturb playback, navigation, or shuffle history. The UI
-// identifies the playing track by URL (stable), not by a view row.
+// Owns an independent **play queue** — a snapshot of Tracks captured when
+// playback starts. The queue is decoupled from whatever the Tracks view is
+// currently showing, so searching/sorting/reloading the library doesn't disturb
+// playback, navigation, or shuffle history. The UI identifies the playing track
+// by URL (stable), not by a view row.
+//
+// The actual QMediaPlayer lives on a worker thread inside MediaEngine, so a slow
+// source open (e.g. over NFS) never blocks the GUI. This controller stays on the
+// GUI thread: it drives the engine via queued signals and caches the latest
+// position/duration/state/volume so the synchronous getters (used by MPRIS) keep
+// working without reaching across the thread boundary.
 class PlayerController : public QObject
 {
     Q_OBJECT
@@ -21,17 +29,18 @@ public:
     enum class RepeatMode { None, All, One };
 
     explicit PlayerController(QObject *parent = nullptr);
+    ~PlayerController() override;
 
     bool hasTrack() const { return m_index >= 0 && m_index < m_queue.size(); }
     Track currentTrack() const { return hasTrack() ? m_queue.at(m_index) : Track{}; }
     int currentIndex() const { return m_index; }     // queue index (e.g. MPRIS id)
     int queueSize() const { return m_queue.size(); }
     const QList<Track> &queue() const { return m_queue; }
-    bool isPlaying() const;
-    QMediaPlayer::PlaybackState playbackState() const { return m_player->playbackState(); }
-    qint64 duration() const;
-    qint64 position() const;
-    float volume() const;
+    bool isPlaying() const { return m_playbackState == QMediaPlayer::PlayingState; }
+    QMediaPlayer::PlaybackState playbackState() const { return m_playbackState; }
+    qint64 duration() const { return m_duration; }
+    qint64 position() const { return m_position; }
+    float volume() const { return m_volume; }
 
     RepeatMode repeatMode() const { return m_repeat; }
     bool shuffle() const { return m_shuffle; }
@@ -77,10 +86,19 @@ signals:
     void metadataResolved(const QUrl &url, const QString &title, const QString &artist,
                           const QString &album, int trackNo, qint64 durationMs);
 
+    // Controller -> MediaEngine (queued; the engine runs on the worker thread).
+    void engineLoad(const QUrl &url, bool autoplay);
+    void enginePlay();
+    void enginePause();
+    void engineStop();
+    void engineSetPosition(qint64 ms);
+    void engineSetVolume(float linear);
+
 private slots:
     void onMediaStatusChanged(QMediaPlayer::MediaStatus status);
-    void onMetaDataChanged();
+    void onMetaDataChanged(const QMediaMetaData &md);
     void onErrorOccurred(QMediaPlayer::Error error, const QString &errorString);
+    void onPlaybackStateChanged(QMediaPlayer::PlaybackState state);
 
 private:
     int pickNext(bool userInitiated) const;
@@ -88,8 +106,12 @@ private:
     void playInternal(int qindex);   // load + play, no history side effects
     void recordHistory(int qindex);  // push onto the back/forward history
 
-    QMediaPlayer *m_player;
-    QAudioOutput *m_audio;
+    QThread *m_engineThread;
+    MediaEngine *m_engine;
+    QMediaPlayer::PlaybackState m_playbackState = QMediaPlayer::StoppedState;
+    qint64 m_position = 0;    // cached from the engine for synchronous getters
+    qint64 m_duration = 0;
+    float m_volume = 0.8f;
     QList<Track> m_queue;
     QList<Track> m_readyQueue;     // silent cold-start fallback (e.g. media keys)
     int m_index = -1;              // index into m_queue

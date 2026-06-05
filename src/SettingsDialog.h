@@ -20,12 +20,13 @@ class SettingsDialog : public QDialog
     Q_OBJECT
 public:
     SettingsDialog(QList<LibraryFolder> folders, bool autoSync, bool restoreQueue,
-                   Theme::Mode themeMode, QString themeFile,
+                   bool autoPlay, Theme::Mode themeMode, QString themeFile,
                    QWidget *parent = nullptr);
 
     QList<LibraryFolder> folders() const;   // labels default to the dir name
     bool autoSync() const;
     bool restoreQueue() const;
+    bool autoPlay() const;
     Theme::Mode themeMode() const;
     QString themeFile() const;
 
@@ -53,4 +54,5 @@ private:
     QLineEdit *m_themeFileEdit;
     QPushButton *m_themeBrowse;
     QCheckBox *m_restoreQueue;
+    QCheckBox *m_autoPlay;
 };

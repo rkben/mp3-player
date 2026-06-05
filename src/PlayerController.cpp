@@ -1,52 +1,78 @@
 #include "PlayerController.h"
+#include "MediaEngine.h"
 
-#include <QAudioOutput>
-#include <QMediaMetaData>
+#include <QThread>
 #include <QRandomGenerator>
 
 PlayerController::PlayerController(QObject *parent)
     : QObject(parent)
-    , m_player(new QMediaPlayer(this))
-    , m_audio(new QAudioOutput(this))
+    , m_engineThread(new QThread(this))
+    , m_engine(new MediaEngine)   // no parent: moved to the worker thread
 {
-    m_player->setAudioOutput(m_audio);
-    m_audio->setVolume(0.8f);
+    // These cross the thread boundary via queued connections, so they must be
+    // registered as metatypes (the QMediaPlayer enums and metadata value type).
+    qRegisterMetaType<QMediaPlayer::MediaStatus>();
+    qRegisterMetaType<QMediaPlayer::PlaybackState>();
+    qRegisterMetaType<QMediaPlayer::Error>();
+    qRegisterMetaType<QMediaMetaData>();
 
-    connect(m_player, &QMediaPlayer::positionChanged,
-            this, &PlayerController::positionChanged);
-    connect(m_player, &QMediaPlayer::durationChanged,
-            this, &PlayerController::durationChanged);
-    connect(m_player, &QMediaPlayer::mediaStatusChanged,
+    m_engine->moveToThread(m_engineThread);
+    connect(m_engineThread, &QThread::started, m_engine, &MediaEngine::init);
+    connect(m_engineThread, &QThread::finished, m_engine, &QObject::deleteLater);
+
+    // Controller -> engine (queued: runs on the worker thread that owns the player).
+    connect(this, &PlayerController::engineLoad, m_engine, &MediaEngine::load);
+    connect(this, &PlayerController::enginePlay, m_engine, &MediaEngine::play);
+    connect(this, &PlayerController::enginePause, m_engine, &MediaEngine::pause);
+    connect(this, &PlayerController::engineStop, m_engine, &MediaEngine::stop);
+    connect(this, &PlayerController::engineSetPosition, m_engine, &MediaEngine::setPosition);
+    connect(this, &PlayerController::engineSetVolume, m_engine, &MediaEngine::setVolume);
+
+    // Engine -> controller (queued: marshalled back to the GUI thread). Position
+    // and duration are cached for the synchronous getters and re-emitted.
+    connect(m_engine, &MediaEngine::positionChanged, this, [this](qint64 ms) {
+        m_position = ms;
+        emit positionChanged(ms);
+    });
+    connect(m_engine, &MediaEngine::durationChanged, this, [this](qint64 ms) {
+        m_duration = ms;
+        emit durationChanged(ms);
+    });
+    connect(m_engine, &MediaEngine::mediaStatusChanged,
             this, &PlayerController::onMediaStatusChanged);
-    connect(m_player, &QMediaPlayer::metaDataChanged,
+    connect(m_engine, &MediaEngine::metaDataChanged,
             this, &PlayerController::onMetaDataChanged);
-    connect(m_player, &QMediaPlayer::errorOccurred,
+    connect(m_engine, &MediaEngine::errorOccurred,
             this, &PlayerController::onErrorOccurred);
-    connect(m_player, &QMediaPlayer::playbackStateChanged, this,
-            [this](QMediaPlayer::PlaybackState s) {
-                if (s == QMediaPlayer::PlayingState) {
-                    m_consecutiveErrors = 0;   // a track played -> chain is healthy
-                    m_lastErrorIndex = -1;
-                }
-                emit playbackStateChanged(s == QMediaPlayer::PlayingState);
-            });
+    connect(m_engine, &MediaEngine::playbackStateChanged,
+            this, &PlayerController::onPlaybackStateChanged);
+
+    m_engineThread->start();
 }
 
-bool PlayerController::isPlaying() const
+PlayerController::~PlayerController()
 {
-    return m_player->playbackState() == QMediaPlayer::PlayingState;
+    m_engineThread->quit();
+    m_engineThread->wait();
 }
 
-qint64 PlayerController::duration() const { return m_player->duration(); }
-qint64 PlayerController::position() const { return m_player->position(); }
-float PlayerController::volume() const { return m_audio->volume(); }
+void PlayerController::onPlaybackStateChanged(QMediaPlayer::PlaybackState s)
+{
+    m_playbackState = s;
+    if (s == QMediaPlayer::PlayingState) {
+        m_consecutiveErrors = 0;   // a track played -> chain is healthy
+        m_lastErrorIndex = -1;
+    }
+    emit playbackStateChanged(s == QMediaPlayer::PlayingState);
+}
 
 void PlayerController::playInternal(int qindex)
 {
     m_index = qindex;
     m_metaResolvedIndex = -1;   // a new track may re-use this slot; resolve afresh
-    m_player->setSource(m_queue.at(qindex).url);
-    m_player->play();
+    m_duration = 0;             // reset cached duration until the new source reports
+    m_position = 0;
+    emit engineLoad(m_queue.at(qindex).url, /*autoplay=*/true);
     emit currentTrackChanged(m_queue.at(qindex));
 }
 
@@ -77,7 +103,7 @@ void PlayerController::playQueue(const QList<Track> &tracks, int start)
 
     if (start < 0 || start >= m_queue.size()) {
         m_index = -1;
-        m_player->stop();
+        emit engineStop();
         emit currentTrackChanged(Track{});
         return;
     }
@@ -133,10 +159,10 @@ void PlayerController::setReadyQueue(const QList<Track> &tracks)
 
 void PlayerController::play()
 {
-    if (m_player->playbackState() == QMediaPlayer::PlayingState)
+    if (m_playbackState == QMediaPlayer::PlayingState)
         return;
     if (hasTrack()) {
-        m_player->play();   // resume a paused track
+        emit enginePlay();   // resume a paused track
         return;
     }
     // Cold start: play the queue if the user built one, else fall back to the
@@ -151,13 +177,13 @@ void PlayerController::play()
     recordHistory(0);
 }
 
-void PlayerController::pause() { m_player->pause(); }
-void PlayerController::stop() { m_player->stop(); }
+void PlayerController::pause() { emit enginePause(); }
+void PlayerController::stop() { emit engineStop(); }
 
 void PlayerController::togglePlayPause()
 {
-    if (m_player->playbackState() == QMediaPlayer::PlayingState)
-        m_player->pause();
+    if (m_playbackState == QMediaPlayer::PlayingState)
+        emit enginePause();
     else
         play();
 }
@@ -184,8 +210,9 @@ void PlayerController::previous()
     // Restart current track if we're more than a few seconds in (common player
     // behaviour: "previous" first rewinds, then steps back).
     constexpr qint64 kRestartThresholdMs = 3000;
-    if (m_player->position() > kRestartThresholdMs) {
-        m_player->setPosition(0);
+    if (m_position > kRestartThresholdMs) {
+        m_position = 0;
+        emit engineSetPosition(0);
         return;
     }
     // Walk back through actual play history — this is what makes "previous" work
@@ -204,13 +231,18 @@ void PlayerController::previous()
     recordHistory(prev);
 }
 
-void PlayerController::setPosition(qint64 ms) { m_player->setPosition(ms); }
+void PlayerController::setPosition(qint64 ms)
+{
+    m_position = ms;   // optimistic; the engine confirms via positionChanged
+    emit engineSetPosition(ms);
+}
 
 void PlayerController::setVolume(float linear)
 {
-    if (qFuzzyCompare(m_audio->volume(), linear))
+    if (qFuzzyCompare(m_volume, linear))
         return;
-    m_audio->setVolume(linear);
+    m_volume = linear;
+    emit engineSetVolume(linear);
     emit volumeChanged(linear);
 }
 
@@ -296,7 +328,7 @@ void PlayerController::skipBadTrack(const QString &message)
 
     // Bail out if everything is failing, so we don't spin through a dead queue.
     if (++m_consecutiveErrors >= m_queue.size()) {
-        m_player->stop();
+        emit engineStop();
         return;
     }
     const int n = pickNext(/*userInitiated=*/true);   // always move forward
@@ -306,13 +338,12 @@ void PlayerController::skipBadTrack(const QString &message)
     }
 }
 
-void PlayerController::onMetaDataChanged()
+void PlayerController::onMetaDataChanged(const QMediaMetaData &md)
 {
     if (!hasTrack())
         return;
     // The player uses the same FFmpeg backend as the scanner, so this fills in
     // metadata for formats TagLib couldn't tag (e.g. .tta). Persisted by the UI.
-    const QMediaMetaData md = m_player->metaData();
     const QString title = md.stringValue(QMediaMetaData::Title);
     QString artist = md.stringValue(QMediaMetaData::ContributingArtist);
     if (artist.isEmpty())
