@@ -277,7 +277,8 @@ QWidget *MainWindow::buildQueuePanel()
     hh->setSectionResizeMode(PlaylistModel::TrackNo,  QHeaderView::ResizeToContents);
     hh->setSectionResizeMode(PlaylistModel::Duration, QHeaderView::ResizeToContents);
     m_table->sortByColumn(-1, Qt::AscendingOrder);   // default: keep DB/result order
-    connect(m_table, &QTableView::activated, this, &MainWindow::onTrackActivated);
+    // Only doubleClicked — `activated` also fires on a double-click (and on Enter),
+    // so connecting both ran the handler twice per double-click.
     connect(m_table, &QTableView::doubleClicked, this, &MainWindow::onTrackActivated);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_table, &QTableView::customContextMenuRequested,
@@ -294,7 +295,8 @@ QWidget *MainWindow::buildQueuePanel()
     m_scope->setMaximumWidth(52);
 
     m_searchEdit = new QLineEdit;
-    m_searchEdit->setPlaceholderText(tr("Search…"));
+    m_searchEdit->setPlaceholderText(tr("Search Library…"));
+    m_searchEdit->setToolTip(tr("Search entire library"));
     m_searchEdit->setClearButtonEnabled(true);
     m_searchEdit->setMaximumWidth(320);   // cap so it doesn't span the whole panel
 
@@ -897,8 +899,18 @@ void MainWindow::onTrackActivated(const QModelIndex &index)
         return;
     const int srcRow = m_proxy->mapToSource(index).row();
     if (m_searching) {
-        // Browse mode: double-clicking a search result enqueues it.
-        m_controller->enqueue({m_model->at(srcRow)});
+        // Browse mode: search results are the library, not the queue. Play the
+        // track in place if it's already queued; otherwise append it and play.
+        const Track &t = m_model->at(srcRow);
+        const QList<Track> &queue = m_controller->queue();
+        int existing = -1;
+        for (int i = 0; i < queue.size(); ++i)
+            if (queue.at(i).url == t.url) { existing = i; break; }
+        if (existing < 0) {
+            m_controller->enqueue({t});
+            existing = m_controller->queueSize() - 1;
+        }
+        m_controller->jumpTo(existing);
     } else {
         // Queue mode: the source row is the queue index — play from there.
         m_controller->jumpTo(srcRow);
