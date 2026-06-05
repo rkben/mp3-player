@@ -128,6 +128,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     startLibraryThread();
     restoreSettings();
+
+    // Persist UI state on any quit path (window close, MPRIS Quit, etc.), not
+    // just closeEvent — saveGeometry() is valid even once the window is hidden.
+    connect(qApp, &QApplication::aboutToQuit, this, &MainWindow::saveUiState);
 }
 
 MainWindow::~MainWindow()
@@ -753,6 +757,32 @@ void MainWindow::restoreSettings()
     // Always kick the worker: it emits the cached library instantly, then
     // reconciles against disk. No folders just yields an empty library.
     emit requestScan(libraryFolderPaths(m_folders));
+
+    restoreUiState();   // window geometry, splitter sizes, column widths
+}
+
+void MainWindow::saveUiState() const
+{
+    QSettings s;
+    s.setValue("ui/geometry", saveGeometry());
+    s.setValue("ui/splitter", m_splitter->saveState());
+    s.setValue("ui/leftPanel", m_leftPanel->saveState());
+    s.setValue("ui/tableHeader", m_table->horizontalHeader()->saveState());
+}
+
+void MainWindow::restoreUiState()
+{
+    QSettings s;
+    // Each is optional: fall back to the layout defaults set in buildUi() when a
+    // key is absent (first run, or settings cleared).
+    if (s.contains("ui/geometry"))
+        restoreGeometry(s.value("ui/geometry").toByteArray());
+    if (s.contains("ui/splitter"))
+        m_splitter->restoreState(s.value("ui/splitter").toByteArray());
+    if (s.contains("ui/leftPanel"))
+        m_leftPanel->restoreState(s.value("ui/leftPanel").toByteArray());
+    if (s.contains("ui/tableHeader"))
+        m_table->horizontalHeader()->restoreState(s.value("ui/tableHeader").toByteArray());
 }
 
 void MainWindow::cycleRepeat()

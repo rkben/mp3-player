@@ -77,6 +77,8 @@ private:
     void loadCover(const QString &artUrl);    // set the cover image (or placeholder)
     void startLibraryThread();
     void restoreSettings();
+    void saveUiState() const;      // window geometry, splitter sizes, column widths
+    void restoreUiState();         // … applied over the built-in defaults if present
     void cycleRepeat();
     void updateRepeatButton();
     void updateVolumeIcon();                      // pick level/mute icon for the volume
