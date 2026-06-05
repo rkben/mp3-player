@@ -187,19 +187,7 @@ void MainWindow::buildUi()
     m_tree->setFrameShape(QFrame::NoFrame);   // no rounded frame border (any style)
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setAnimated(true);
-    m_tree->setExpandsOnDoubleClick(false);   // single-click toggles; dbl-click enqueues
-    // A single click on a folder toggles its expansion, but a double-click (two
-    // clicks) would otherwise toggle *and* enqueue. Defer the toggle by the
-    // double-click interval so onTreeActivated can cancel it for a genuine
-    // double-click — giving clean single=expand, double=enqueue behaviour.
-    m_treeClickTimer = new QTimer(this);
-    m_treeClickTimer->setSingleShot(true);
-    m_treeClickTimer->setInterval(QApplication::doubleClickInterval());
-    connect(m_treeClickTimer, &QTimer::timeout, this, [this] {
-        if (m_pendingToggle.isValid())
-            m_tree->setExpanded(m_pendingToggle, !m_tree->isExpanded(m_pendingToggle));
-        m_pendingToggle = QModelIndex();
-    });
+    m_tree->setExpandsOnDoubleClick(false);   // single-click expands; dbl-click enqueues files
     connect(m_tree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
     connect(m_tree, &QTreeView::doubleClicked, this, &MainWindow::onTreeActivated);
     connect(m_tree, &QTreeView::expanded, this, &MainWindow::onTreeExpanded);
@@ -889,21 +877,16 @@ void MainWindow::onTrackActivated(const QModelIndex &index)
 
 void MainWindow::onTreeClicked(const QModelIndex &index)
 {
-    // Single click on a folder toggles its expansion (no need to hit the arrow),
-    // but defer it so a double-click (enqueue) can cancel the toggle.
-    if (index.isValid() && index.data(IsDirRole).toBool()) {
-        m_pendingToggle = index;
-        m_treeClickTimer->start();
-    }
+    // Single click on a folder toggles its expansion (no need to hit the arrow).
+    if (index.isValid() && index.data(IsDirRole).toBool())
+        m_tree->setExpanded(index, !m_tree->isExpanded(index));
 }
 
 void MainWindow::onTreeActivated(const QModelIndex &index)
 {
-    // Double-click a file or folder: append its track(s) to the play queue.
-    // Cancel the pending single-click expand so the folder doesn't also toggle.
-    m_treeClickTimer->stop();
-    m_pendingToggle = QModelIndex();
-    if (!index.isValid())
+    // Double-click a file to enqueue it. Directories only expand (single-click);
+    // their "Add to queue" / "Play now" live in the right-click menu.
+    if (!index.isValid() || index.data(IsDirRole).toBool())
         return;
     const QList<Track> add = tracksForPath(index.data(PathRole).toString());
     if (!add.isEmpty())

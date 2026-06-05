@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QWidget>
-#include <QPersistentModelIndex>
 
 #include "PlaylistModel.h"   // Track (for QList<Track> signal arg)
 #include "LibraryFolder.h"
@@ -116,8 +115,6 @@ private:
     QLineEdit *m_searchEdit;
     QComboBox *m_scope;
     QTimer *m_searchTimer;
-    QTimer *m_treeClickTimer;          // defers single-click expand so dbl-click can cancel
-    QPersistentModelIndex m_pendingToggle;   // dir awaiting a single-click expand toggle
     QLabel *m_status;
     QSlider *m_seek;
     QLabel *m_elapsed;
