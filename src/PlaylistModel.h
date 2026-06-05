@@ -2,6 +2,7 @@
 
 #include <QAbstractTableModel>
 #include <QList>
+#include <QHash>
 #include <QUrl>
 #include <QMetaType>
 
@@ -18,6 +19,20 @@ struct Track {
     // "Artist — Title" when an artist tag exists, else just the title.
     QString displayText() const {
         return artist.isEmpty() ? title : artist + QStringLiteral(" — ") + title;
+    }
+
+    // Overlay non-empty/positive fields from `other` onto this track, leaving the
+    // rest intact. Returns true if anything actually changed. Shared by the model
+    // and the player so the "keep existing values" rule lives in one place.
+    bool mergeFrom(const QString &t, const QString &a, const QString &al,
+                   qint64 dur, int tno) {
+        bool changed = false;
+        if (!t.isEmpty()  && title  != t)  { title  = t;  changed = true; }
+        if (!a.isEmpty()  && artist != a)  { artist = a;  changed = true; }
+        if (!al.isEmpty() && album  != al) { album  = al; changed = true; }
+        if (dur > 0       && durationMs != dur) { durationMs = dur; changed = true; }
+        if (tno > 0       && trackNo != tno)    { trackNo = tno;    changed = true; }
+        return changed;
     }
 };
 
@@ -45,6 +60,9 @@ public:
     int count() const { return m_tracks.size(); }
 
     const Track &at(int row) const { return m_tracks.at(row); }
+    // O(1) row lookup by local file path; -1 if not present. Kept in sync with
+    // the row list so callers don't have to linear-scan on every track change.
+    int rowForPath(const QString &localFile) const { return m_indexByPath.value(localFile, -1); }
     void setTitle(int row, const QString &title);
     void setArtUrl(int row, const QString &artUrl);
     // Merge in player-resolved metadata; only non-empty/positive fields overwrite.
@@ -52,7 +70,10 @@ public:
                      const QString &album, qint64 durationMs, int trackNo);
 
 private:
+    void rebuildIndex();   // refresh m_indexByPath from m_tracks
+
     QList<Track> m_tracks;
+    QHash<QString, int> m_indexByPath;   // local file path -> row, for O(1) lookup
 };
 
 Q_DECLARE_METATYPE(Track)

@@ -1,14 +1,5 @@
 #include "PlaylistModel.h"
-
-namespace {
-QString formatDuration(qint64 ms)
-{
-    if (ms <= 0)
-        return {};
-    const qint64 secs = ms / 1000;
-    return QStringLiteral("%1:%2").arg(secs / 60).arg(secs % 60, 2, 10, QLatin1Char('0'));
-}
-}
+#include "TimeFormat.h"
 
 PlaylistModel::PlaylistModel(QObject *parent)
     : QAbstractTableModel(parent)
@@ -44,7 +35,7 @@ QVariant PlaylistModel::data(const QModelIndex &index, int role) const
         case Album:    return t.album;
         case Year:     return t.year > 0 ? QString::number(t.year) : QString();
         case TrackNo:  return t.trackNo > 0 ? QString::number(t.trackNo) : QString();
-        case Duration: return formatDuration(t.durationMs);
+        case Duration: return t.durationMs > 0 ? formatTime(t.durationMs) : QString();
         }
         return {};
     case Qt::TextAlignmentRole:
@@ -74,10 +65,19 @@ QVariant PlaylistModel::headerData(int section, Qt::Orientation orientation, int
     return {};
 }
 
+void PlaylistModel::rebuildIndex()
+{
+    m_indexByPath.clear();
+    m_indexByPath.reserve(m_tracks.size());
+    for (int i = 0; i < m_tracks.size(); ++i)
+        m_indexByPath.insert(m_tracks.at(i).url.toLocalFile(), i);
+}
+
 void PlaylistModel::setTracks(QList<Track> tracks)
 {
     beginResetModel();
     m_tracks = std::move(tracks);
+    rebuildIndex();
     endResetModel();
 }
 
@@ -93,14 +93,7 @@ void PlaylistModel::updateTrack(int row, const QString &title, const QString &ar
 {
     if (row < 0 || row >= m_tracks.size())
         return;
-    Track &t = m_tracks[row];
-    bool changed = false;
-    if (!title.isEmpty()  && t.title  != title)  { t.title  = title;  changed = true; }
-    if (!artist.isEmpty() && t.artist != artist) { t.artist = artist; changed = true; }
-    if (!album.isEmpty()  && t.album  != album)  { t.album  = album;  changed = true; }
-    if (durationMs > 0    && t.durationMs != durationMs) { t.durationMs = durationMs; changed = true; }
-    if (trackNo > 0       && t.trackNo != trackNo) { t.trackNo = trackNo; changed = true; }
-    if (changed)
+    if (m_tracks[row].mergeFrom(title, artist, album, durationMs, trackNo))
         emit dataChanged(index(row, 0), index(row, ColumnCount - 1),
                          {Qt::DisplayRole, Qt::ToolTipRole});
 }
@@ -112,6 +105,8 @@ void PlaylistModel::appendTracks(const QList<Track> &tracks)
     const int first = m_tracks.size();
     beginInsertRows({}, first, first + tracks.size() - 1);
     m_tracks.append(tracks);
+    for (int i = first; i < m_tracks.size(); ++i)
+        m_indexByPath.insert(m_tracks.at(i).url.toLocalFile(), i);
     endInsertRows();
 }
 
@@ -119,6 +114,7 @@ void PlaylistModel::clear()
 {
     beginResetModel();
     m_tracks.clear();
+    m_indexByPath.clear();
     endResetModel();
 }
 

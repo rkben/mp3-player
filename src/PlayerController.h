@@ -96,4 +96,5 @@ private:
     bool m_shuffle = false;
     int m_consecutiveErrors = 0;   // guards against an all-bad queue looping
     int m_lastErrorIndex = -1;     // dedupe: error + InvalidMedia fire together
+    int m_metaResolvedIndex = -1;  // dedupe: metaDataChanged fires repeatedly
 };

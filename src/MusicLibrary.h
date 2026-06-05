@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QHash>
 #include <QAtomicInt>
 #include <QThreadPool>
@@ -26,6 +27,7 @@ public:
     enum SearchScope { ScopeAll = 0, ScopeTitle, ScopeArtist, ScopeAlbum, ScopeYear };
 
     explicit MusicLibrary(QObject *parent = nullptr);
+    ~MusicLibrary() override;
 
 public slots:
     // Invoke via queued connection so it executes on the worker thread. Walks
@@ -63,7 +65,8 @@ signals:
 private:
     bool ensureDb();
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
-    void upsert(const Track &t, qint64 mtime);
+    QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
+    static void upsert(QSqlQuery &q, const Track &t, qint64 mtime);
     static Track parseTags(const QString &path, qint64 mtime);
     QString extractArt(const QString &path, qint64 mtime);   // -> file:// URL or empty
     static QString buildMatchQuery(const QString &text, int scope);  // FTS5 MATCH expr
@@ -71,6 +74,7 @@ private:
     QSqlDatabase m_db;
     QString m_artDir;     // cache dir for extracted embedded covers
     bool m_opened = false;
+    bool m_scanning = false;   // re-entrancy guard while pumping events mid-scan
     QAtomicInt m_cancel{0};
     QThreadPool m_pool;   // dedicated pool for parsing; cap set per scan
 };

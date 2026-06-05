@@ -5,6 +5,8 @@
 #include "MusicLibrary.h"
 #include "CoverLabel.h"
 #include "Theme.h"
+#include "AudioFormats.h"
+#include "TimeFormat.h"
 #ifdef HAVE_MPRIS
 #include "MprisController.h"
 #endif
@@ -52,10 +54,8 @@ enum TreeRole {
     PopulatedRole,                 // bool: children have been lazily loaded
 };
 
-const QStringList kAudioGlobs{
-    "*.mp3", "*.flac", "*.ogg", "*.oga", "*.opus", "*.m4a", "*.m4b", "*.aac",
-    "*.wav", "*.aiff", "*.aif", "*.wma", "*.ape", "*.wv", "*.mpc", "*.mp2",
-    "*.spx", "*.tta", "*.dsf", "*.ac3"};
+constexpr int kStatusTimeoutMs = 4000;   // how long a transient status line lingers
+constexpr int kSearchDebounceMs = 220;   // idle time after typing before searching
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -81,7 +81,7 @@ MainWindow::MainWindow(QWidget *parent)
                 m_status->setText(text);
                 m_status->show();
                 // Transient: clear it after a few seconds (unless superseded).
-                QTimer::singleShot(4000, this, [this, text] {
+                QTimer::singleShot(kStatusTimeoutMs, this, [this, text] {
                     if (m_status->text() == text)
                         m_status->hide();
                 });
@@ -112,8 +112,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &PlayerController::volumeChanged, this, [this](float v) {
         const int pct = qRound(v * 100);
         QSignalBlocker block(m_volume);
-        m_volume->setValue(pct);
-        QSettings().setValue("playback/volume", pct);
+        m_volume->setValue(pct);   // persisted on slider release, not per change
+        updateVolumeIcon();        // block() suppressed valueChanged, so refresh here
     });
     connect(m_controller, &PlayerController::repeatModeChanged, this,
             [this](PlayerController::RepeatMode mode) {
@@ -188,6 +188,18 @@ void MainWindow::buildUi()
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setAnimated(true);
     m_tree->setExpandsOnDoubleClick(false);   // single-click toggles; dbl-click enqueues
+    // A single click on a folder toggles its expansion, but a double-click (two
+    // clicks) would otherwise toggle *and* enqueue. Defer the toggle by the
+    // double-click interval so onTreeActivated can cancel it for a genuine
+    // double-click — giving clean single=expand, double=enqueue behaviour.
+    m_treeClickTimer = new QTimer(this);
+    m_treeClickTimer->setSingleShot(true);
+    m_treeClickTimer->setInterval(QApplication::doubleClickInterval());
+    connect(m_treeClickTimer, &QTimer::timeout, this, [this] {
+        if (m_pendingToggle.isValid())
+            m_tree->setExpanded(m_pendingToggle, !m_tree->isExpanded(m_pendingToggle));
+        m_pendingToggle = QModelIndex();
+    });
     connect(m_tree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
     connect(m_tree, &QTreeView::doubleClicked, this, &MainWindow::onTreeActivated);
     connect(m_tree, &QTreeView::expanded, this, &MainWindow::onTreeExpanded);
@@ -296,7 +308,7 @@ QWidget *MainWindow::buildQueuePanel()
 
     m_searchTimer = new QTimer(this);
     m_searchTimer->setSingleShot(true);
-    m_searchTimer->setInterval(220);
+    m_searchTimer->setInterval(kSearchDebounceMs);
     connect(m_searchTimer, &QTimer::timeout, this, [this] {
         m_searching = true;
         emit requestSearch(m_searchEdit->text(), m_scope->currentIndex());
@@ -341,7 +353,7 @@ void MainWindow::scheduleSearch()
         }
         return;
     }
-    m_searchTimer->start();   // debounce: fire 220ms after typing stops
+    m_searchTimer->start();   // debounce: fire once typing pauses
 }
 
 QWidget *MainWindow::buildTrackInfoPanel()
@@ -482,8 +494,13 @@ QWidget *MainWindow::buildTransportBar()
     m_volume->setFixedWidth(110);
     connect(m_volume, &QSlider::valueChanged, this, [this](int v) {
         m_controller->setVolume(v / 100.0f);
+        if (v > 0)
+            m_preMuteVolume = v;   // so un-mute restores the last *audible* level
         updateVolumeIcon();
     });
+    // Persist on release (or keyboard step), not on every drag tick.
+    connect(m_volume, &QSlider::sliderReleased, this,
+            [this] { QSettings().setValue("playback/volume", m_volume->value()); });
 
     m_settingsBtn = new QToolButton;
     m_settingsBtn->setIconSize(QSize(20, 20));
@@ -574,12 +591,18 @@ void MainWindow::populateNode(QStandardItem *item)
         child->setData(sub.absoluteFilePath(), PathRole);
         child->setData(true, IsDirRole);
         child->setData(false, PopulatedRole);
-        if (!sub.absoluteDir().isEmpty())
-            child->appendRow(new QStandardItem);   // assume expandable; pruned lazily
+        // Only show an expand arrow if the subdir actually has children (a nested
+        // folder or an audio file). One extra dir read per subdir, on expansion.
+        QDir sd(sub.absoluteFilePath());
+        const bool hasChildren =
+            !sd.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty()
+            || !sd.entryInfoList(audioGlobs(), QDir::Files).isEmpty();
+        if (hasChildren)
+            child->appendRow(new QStandardItem);   // placeholder; replaced lazily
         item->appendRow(child);
     }
 
-    const auto files = dir.entryInfoList(kAudioGlobs, QDir::Files,
+    const auto files = dir.entryInfoList(audioGlobs(), QDir::Files,
                                          QDir::Name | QDir::LocaleAware);
     for (const QFileInfo &file : files) {
         auto *child = new QStandardItem(fileIcon, file.fileName());
@@ -596,12 +619,9 @@ void MainWindow::onTreeExpanded(const QModelIndex &index)
 
 int MainWindow::playRowForPath(const QString &path) const
 {
-    // Compare URLs directly so we don't allocate a toLocalFile() string per row.
-    const QUrl target = QUrl::fromLocalFile(path);
-    for (int i = 0; i < m_model->count(); ++i)
-        if (m_model->at(i).url == target)
-            return i;
-    return -1;
+    // O(1) via the model's path index — this is hit several times per track
+    // change (highlight, art, metadata), so a linear scan over a 45k queue hurt.
+    return m_model->rowForPath(path);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
@@ -869,14 +889,20 @@ void MainWindow::onTrackActivated(const QModelIndex &index)
 
 void MainWindow::onTreeClicked(const QModelIndex &index)
 {
-    // Single click on a folder toggles its expansion (no need to hit the arrow).
-    if (index.isValid() && index.data(IsDirRole).toBool())
-        m_tree->setExpanded(index, !m_tree->isExpanded(index));
+    // Single click on a folder toggles its expansion (no need to hit the arrow),
+    // but defer it so a double-click (enqueue) can cancel the toggle.
+    if (index.isValid() && index.data(IsDirRole).toBool()) {
+        m_pendingToggle = index;
+        m_treeClickTimer->start();
+    }
 }
 
 void MainWindow::onTreeActivated(const QModelIndex &index)
 {
     // Double-click a file or folder: append its track(s) to the play queue.
+    // Cancel the pending single-click expand so the folder doesn't also toggle.
+    m_treeClickTimer->stop();
+    m_pendingToggle = QModelIndex();
     if (!index.isValid())
         return;
     const QList<Track> add = tracksForPath(index.data(PathRole).toString());
@@ -992,7 +1018,7 @@ QList<Track> MainWindow::tracksForPath(const QString &path) const
 
     // Folder: gather audio files beneath it, in name order.
     QStringList files;
-    QDirIterator it(path, kAudioGlobs, QDir::Files, QDirIterator::Subdirectories);
+    QDirIterator it(path, audioGlobs(), QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext())
         files.append(it.next());
     files.sort(Qt::CaseInsensitive);
@@ -1016,9 +1042,11 @@ QList<Track> MainWindow::tracksForPath(const QString &path) const
 
 void MainWindow::updateQueueTitle()
 {
-    // QLocale groups digits per the user's locale (e.g. "1,000").
+    // QLocale groups digits per the user's locale (e.g. "1,000"). Constructing
+    // one is cheap but not free, and this is called on every queue change.
+    static const QLocale locale;
     m_queueTitle->setText(tr("Queue (%1)")
-                              .arg(QLocale().toString(m_controller->queueSize())));
+                              .arg(locale.toString(m_controller->queueSize())));
 }
 
 void MainWindow::onQueueChanged(const QList<Track> &queue)
@@ -1046,6 +1074,8 @@ void MainWindow::onCurrentTrackChanged(const Track &track)
     // not on art/metadata refreshes, which re-emit currentTrackChanged.
     const bool changed = (track.url != m_nowPlayingUrl);
     m_nowPlayingUrl = track.url;
+    if (changed)
+        m_lastElapsedSec = -1;   // force the elapsed label to refresh for the new track
     highlightPlaying(track.url, /*scroll=*/changed);
     // Lazily resolve cover art for the now-playing track (worker thread).
     if (changed)
@@ -1077,20 +1107,17 @@ void MainWindow::onPositionChanged(qint64 ms)
 {
     if (!m_userSeeking)
         m_seek->setValue(static_cast<int>(ms));
-    m_elapsed->setText(formatTime(ms));
+    // positionChanged fires several times a second; the elapsed label only
+    // changes once a second, so skip the string alloc + repaint in between.
+    const qint64 sec = ms / 1000;
+    if (sec != m_lastElapsedSec) {
+        m_lastElapsedSec = sec;
+        m_elapsed->setText(formatTime(ms));
+    }
 }
 
 void MainWindow::onDurationChanged(qint64 ms)
 {
-    m_duration = ms;
     m_seek->setRange(0, static_cast<int>(ms));
     m_total->setText(formatTime(ms));
-}
-
-QString MainWindow::formatTime(qint64 ms)
-{
-    const qint64 totalSecs = ms / 1000;
-    const qint64 mins = totalSecs / 60;
-    const qint64 secs = totalSecs % 60;
-    return QString("%1:%2").arg(mins).arg(secs, 2, 10, QLatin1Char('0'));
 }

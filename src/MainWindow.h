@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QPersistentModelIndex>
 
 #include "PlaylistModel.h"   // Track (for QList<Track> signal arg)
 #include "LibraryFolder.h"
@@ -91,7 +92,6 @@ private:
     void highlightPlaying(const QUrl &url, bool scroll);
     void seedReadyQueue();   // give the player a ready queue when nothing's playing
     void applyCompact(bool compact);   // narrow/mobile vs wide/desktop layout
-    static QString formatTime(qint64 ms);
 
     PlaylistModel *m_model;
     PlayerController *m_controller;
@@ -116,6 +116,8 @@ private:
     QLineEdit *m_searchEdit;
     QComboBox *m_scope;
     QTimer *m_searchTimer;
+    QTimer *m_treeClickTimer;          // defers single-click expand so dbl-click can cancel
+    QPersistentModelIndex m_pendingToggle;   // dir awaiting a single-click expand toggle
     QLabel *m_status;
     QSlider *m_seek;
     QLabel *m_elapsed;
@@ -129,7 +131,7 @@ private:
 
     bool m_userSeeking = false;
     int m_preMuteVolume = 80;   // volume to restore when un-muting
-    qint64 m_duration = 0;
+    qint64 m_lastElapsedSec = -1;   // last second shown in the elapsed label
     QUrl m_nowPlayingUrl;    // track currently revealed in the table (scroll guard)
     QList<LibraryFolder> m_folders;
     int m_repeatState = 0;   // 0 None, 1 All, 2 One

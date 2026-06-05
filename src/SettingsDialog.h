@@ -6,7 +6,6 @@
 #include "LibraryFolder.h"
 
 class QLineEdit;
-class QSpinBox;
 class QCheckBox;
 class QComboBox;
 class QPushButton;
@@ -14,8 +13,8 @@ class QTableWidget;
 class QWidget;
 
 // Tabbed modal settings dialog. General tab holds appearance (theme); Library
-// tab holds the music folder, scan thread cap, a manual Sync button, and an Auto
-// Sync toggle. Designed so more tabs/options slot in later.
+// tab holds the labelled music folders, a manual Sync button, and an Auto Sync
+// toggle; About tab holds version/attribution. Designed so more tabs slot in.
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -42,6 +41,7 @@ private slots:
 private:
     void onThemeRowChanged();
     QWidget *buildGeneralTab();
+    QWidget *buildLibraryTab(bool autoSync);
     QWidget *buildAboutTab();
     void addFolderRow(const LibraryFolder &f);
 

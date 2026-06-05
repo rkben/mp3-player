@@ -44,6 +44,7 @@ float PlayerController::volume() const { return m_audio->volume(); }
 void PlayerController::playInternal(int qindex)
 {
     m_index = qindex;
+    m_metaResolvedIndex = -1;   // a new track may re-use this slot; resolve afresh
     m_player->setSource(m_queue.at(qindex).url);
     m_player->play();
     emit currentTrackChanged(m_queue.at(qindex));
@@ -159,8 +160,10 @@ void PlayerController::previous()
 {
     if (m_queue.isEmpty())
         return;
-    // Restart current track if we're more than 3s in (common player behaviour).
-    if (m_player->position() > 3000) {
+    // Restart current track if we're more than a few seconds in (common player
+    // behaviour: "previous" first rewinds, then steps back).
+    constexpr qint64 kRestartThresholdMs = 3000;
+    if (m_player->position() > kRestartThresholdMs) {
         m_player->setPosition(0);
         return;
     }
@@ -301,13 +304,17 @@ void PlayerController::onMetaDataChanged()
         return;   // nothing useful to surface
 
     // Fill the queue copy so the now-playing display and MPRIS reflect it too.
+    // (Don't fold duration/trackNo into the queue Track — they're surfaced via
+    // metadataResolved/the DB, not the now-playing labels.)
     Track &t = m_queue[m_index];
-    bool changed = false;
-    if (!title.isEmpty()  && t.title  != title)  { t.title  = title;  changed = true; }
-    if (!artist.isEmpty() && t.artist != artist) { t.artist = artist; changed = true; }
-    if (!album.isEmpty()  && t.album  != album)  { t.album  = album;  changed = true; }
+    const bool changed = t.mergeFrom(title, artist, album, /*dur=*/0, /*tno=*/0);
     if (changed)
         emit currentTrackChanged(t);
 
+    // metaDataChanged can fire several times per track; only persist when the
+    // track changed or its tags actually moved, so we don't spam the DB writer.
+    if (!changed && m_metaResolvedIndex == m_index)
+        return;
+    m_metaResolvedIndex = m_index;
     emit metadataResolved(t.url, title, artist, album, trackNo, durationMs);
 }

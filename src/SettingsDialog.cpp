@@ -7,7 +7,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QSpinBox>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFont>
@@ -63,61 +62,9 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     onThemeRowChanged();   // set initial enabled state (no signal needed)
 
     // ---- Library tab ----
-    auto *library = new QWidget;
-    auto *libLayout = new QVBoxLayout(library);
-
-    // Multiple labelled folders. Top-level label shows in the library tree.
-    libLayout->addWidget(new QLabel(tr("Library folders:")));
-
-    m_folderTable = new QTableWidget(0, 2);
-    m_folderTable->setHorizontalHeaderLabels({tr("Label"), tr("Path")});
-    m_folderTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_folderTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    m_folderTable->verticalHeader()->hide();
-    m_folderTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_folderTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    QWidget *library = buildLibraryTab(autoSync);
     for (const LibraryFolder &f : folders)
-        addFolderRow(f);
-    libLayout->addWidget(m_folderTable, 1);
-
-    auto *folderBtns = new QHBoxLayout;
-    auto *addBtn = new QPushButton(tr("Add folder…"));
-    addBtn->setMinimumHeight(34);
-    connect(addBtn, &QPushButton::clicked, this, &SettingsDialog::addFolder);
-    m_removeBtn = new QPushButton(tr("Remove"));
-    m_removeBtn->setMinimumHeight(34);
-    connect(m_removeBtn, &QPushButton::clicked, this, &SettingsDialog::removeFolder);
-    folderBtns->addWidget(addBtn);
-    folderBtns->addWidget(m_removeBtn);
-    folderBtns->addStretch();
-    libLayout->addLayout(folderBtns);
-
-    auto *form = new QFormLayout;
-    form->setSpacing(8);
-
-    m_autoSync = new QCheckBox(tr("Automatically sync the library"));
-    m_autoSync->setChecked(autoSync);
-    m_autoSync->setToolTip(tr("Watch the library folders and sync changes "
-                              "automatically. (Not implemented yet.)"));
-    form->addRow(tr("Auto sync:"), m_autoSync);
-
-    libLayout->addLayout(form);
-
-    // Manual sync: a quick mtime reconcile of all configured folders.
-    auto *syncRow = new QHBoxLayout;
-    auto *syncBtn = new QPushButton(tr("Sync now"));
-    syncBtn->setMinimumHeight(34);
-    syncBtn->setToolTip(tr("Scan the library folders for new, changed, "
-                           "and removed files."));
-    connect(syncBtn, &QPushButton::clicked, this, &SettingsDialog::syncRequested);
-    auto *syncHint = new QLabel(tr("Checks for new/changed/removed files."));
-    QFont hintFont = syncHint->font();
-    hintFont.setPointSize(qMax(1, hintFont.pointSize() - 1));
-    syncHint->setFont(hintFont);
-    syncRow->addWidget(syncBtn);
-    syncRow->addWidget(syncHint, 1);
-    libLayout->addLayout(syncRow);
-
+        addFolderRow(f);   // m_folderTable exists once buildLibraryTab has run
     tabs->addTab(library, tr("Library"));
     tabs->addTab(buildAboutTab(), tr("About"));
     tabs->setCurrentWidget(library);
@@ -173,6 +120,64 @@ QWidget *SettingsDialog::buildGeneralTab()
     form->addRow(tr("Stylesheet:"), fileRow);
 
     return general;
+}
+
+QWidget *SettingsDialog::buildLibraryTab(bool autoSync)
+{
+    auto *library = new QWidget;
+    auto *libLayout = new QVBoxLayout(library);
+
+    // Multiple labelled folders. Top-level label shows in the library tree.
+    libLayout->addWidget(new QLabel(tr("Library folders:")));
+
+    m_folderTable = new QTableWidget(0, 2);
+    m_folderTable->setHorizontalHeaderLabels({tr("Label"), tr("Path")});
+    m_folderTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_folderTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_folderTable->verticalHeader()->hide();
+    m_folderTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_folderTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    libLayout->addWidget(m_folderTable, 1);
+
+    auto *folderBtns = new QHBoxLayout;
+    auto *addBtn = new QPushButton(tr("Add folder…"));
+    addBtn->setMinimumHeight(34);
+    connect(addBtn, &QPushButton::clicked, this, &SettingsDialog::addFolder);
+    m_removeBtn = new QPushButton(tr("Remove"));
+    m_removeBtn->setMinimumHeight(34);
+    connect(m_removeBtn, &QPushButton::clicked, this, &SettingsDialog::removeFolder);
+    folderBtns->addWidget(addBtn);
+    folderBtns->addWidget(m_removeBtn);
+    folderBtns->addStretch();
+    libLayout->addLayout(folderBtns);
+
+    auto *form = new QFormLayout;
+    form->setSpacing(8);
+
+    m_autoSync = new QCheckBox(tr("Automatically sync the library"));
+    m_autoSync->setChecked(autoSync);
+    m_autoSync->setToolTip(tr("Watch the library folders and sync changes "
+                              "automatically. (Not implemented yet.)"));
+    form->addRow(tr("Auto sync:"), m_autoSync);
+
+    libLayout->addLayout(form);
+
+    // Manual sync: a quick mtime reconcile of all configured folders.
+    auto *syncRow = new QHBoxLayout;
+    auto *syncBtn = new QPushButton(tr("Sync now"));
+    syncBtn->setMinimumHeight(34);
+    syncBtn->setToolTip(tr("Scan the library folders for new, changed, "
+                           "and removed files."));
+    connect(syncBtn, &QPushButton::clicked, this, &SettingsDialog::syncRequested);
+    auto *syncHint = new QLabel(tr("Checks for new/changed/removed files."));
+    QFont hintFont = syncHint->font();
+    hintFont.setPointSize(qMax(1, hintFont.pointSize() - 1));
+    syncHint->setFont(hintFont);
+    syncRow->addWidget(syncBtn);
+    syncRow->addWidget(syncHint, 1);
+    libLayout->addLayout(syncRow);
+
+    return library;
 }
 
 QWidget *SettingsDialog::buildAboutTab()

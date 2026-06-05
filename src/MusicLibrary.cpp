@@ -14,11 +14,13 @@
 #include <QThread>
 #include <QSettings>
 #include <QElapsedTimer>
+#include <QCoreApplication>
 
 #include <QCryptographicHash>
 #include <QUrl>
 
 #include "YearParser.h"
+#include "AudioFormats.h"
 
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
@@ -27,13 +29,6 @@
 #include <taglib/tpropertymap.h>
 
 namespace {
-// Formats the QMediaPlayer FFmpeg backend can decode and TagLib can (mostly)
-// tag. QDir name filters are case-insensitive, so .MP3/.FLAC match too. Files
-// TagLib can't read still play — they just fall back to a filename title.
-const QStringList kFilters{
-    "*.mp3", "*.flac", "*.ogg", "*.oga", "*.opus", "*.m4a", "*.m4b", "*.aac",
-    "*.wav", "*.aiff", "*.aif", "*.wma", "*.ape", "*.wv", "*.mpc", "*.mp2",
-    "*.spx", "*.tta", "*.dsf", "*.ac3"};
 constexpr int kCommitEvery = 1000;   // rows per transaction batch
 constexpr int kAppendBatch = 200;    // tracks per progressive UI append
 constexpr int kProgressEvery = 250;  // progress emit cadence
@@ -46,6 +41,18 @@ struct ParsedRow { Track track; qint64 mtime; };
 MusicLibrary::MusicLibrary(QObject *parent)
     : QObject(parent)
 {
+}
+
+MusicLibrary::~MusicLibrary()
+{
+    // Close and drop our connection so Qt doesn't warn about a still-open
+    // connection at teardown. Runs on the worker thread (the one that opened it).
+    if (m_opened) {
+        const QString name = m_db.connectionName();
+        m_db.close();
+        m_db = QSqlDatabase();   // release our handle before removing the connection
+        QSqlDatabase::removeDatabase(name);
+    }
 }
 
 bool MusicLibrary::ensureDb()
@@ -147,23 +154,34 @@ QList<Track> MusicLibrary::loadAll(QHash<QString, qint64> *mtimesOut)
     return tracks;
 }
 
-void MusicLibrary::upsert(const Track &t, qint64 mtime)
+QSqlQuery MusicLibrary::prepareUpsert()
 {
+    // Prepared once per scan and re-bound per row (the cold-scan loop runs this up
+    // to 45k times, so re-parsing the SQL each call is a real cost). On an mtime
+    // change we null art_url so re-tagged files re-extract their (possibly new)
+    // cover; an unchanged mtime keeps the cached art.
     QSqlQuery q(m_db);
     q.prepare("INSERT INTO tracks(path, mtime, artist, title, album, duration, "
               "track_no, year) VALUES(?,?,?,?,?,?,?,?) "
               "ON CONFLICT(path) DO UPDATE SET "
               "mtime=excluded.mtime, artist=excluded.artist, title=excluded.title, "
               "album=excluded.album, duration=excluded.duration, "
-              "track_no=excluded.track_no, year=excluded.year");
-    q.addBindValue(t.url.toLocalFile());
-    q.addBindValue(mtime);
-    q.addBindValue(t.artist);
-    q.addBindValue(t.title);
-    q.addBindValue(t.album);
-    q.addBindValue(t.durationMs);
-    q.addBindValue(t.trackNo);
-    q.addBindValue(t.year);
+              "track_no=excluded.track_no, year=excluded.year, "
+              "art_url=CASE WHEN tracks.mtime<>excluded.mtime "
+              "THEN NULL ELSE tracks.art_url END");
+    return q;
+}
+
+void MusicLibrary::upsert(QSqlQuery &q, const Track &t, qint64 mtime)
+{
+    q.bindValue(0, t.url.toLocalFile());
+    q.bindValue(1, mtime);
+    q.bindValue(2, t.artist);
+    q.bindValue(3, t.title);
+    q.bindValue(4, t.album);
+    q.bindValue(5, t.durationMs);
+    q.bindValue(6, t.trackNo);
+    q.bindValue(7, t.year);
     if (!q.exec())
         qWarning() << "upsert failed:" << q.lastError().text();
 }
@@ -407,6 +425,14 @@ void MusicLibrary::search(const QString &text, int scope)
 
 void MusicLibrary::scan(const QStringList &folders)
 {
+    // We pump the worker's event loop mid-scan (below) so interactive queries —
+    // search, art resolution — don't starve. That can re-deliver a queued scan()
+    // call; ignore it rather than recurse into a half-finished transaction.
+    if (m_scanning)
+        return;
+    m_scanning = true;
+    struct ScanGuard { bool &f; ~ScanGuard() { f = false; } } scanGuard{m_scanning};
+
     m_cancel.storeRelaxed(0);
 
     if (!ensureDb())
@@ -435,7 +461,7 @@ void MusicLibrary::scan(const QStringList &folders)
     for (const QString &folder : folders) {
         if (folder.isEmpty())
             continue;
-        QDirIterator it(folder, kFilters, QDir::Files, QDirIterator::Subdirectories);
+        QDirIterator it(folder, audioGlobs(), QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = it.next();
             if (seen.contains(path))
@@ -469,6 +495,7 @@ void MusicLibrary::scan(const QStringList &folders)
             });
 
         m_db.transaction();
+        QSqlQuery up = prepareUpsert();
         int sinceCommit = 0;
         int done = 0;
         QList<Track> batch;
@@ -480,7 +507,7 @@ void MusicLibrary::scan(const QStringList &folders)
                 future.cancel();
                 break;
             }
-            upsert(it->track, it->mtime);
+            upsert(up, it->track, it->mtime);
             changed = true;
             if (cold) {
                 batch.append(it->track);
@@ -494,8 +521,12 @@ void MusicLibrary::scan(const QStringList &folders)
                 m_db.transaction();
                 sinceCommit = 0;
             }
-            if (++done % kProgressEvery == 0)
+            if (++done % kProgressEvery == 0) {
                 emit scanProgress(done, total);
+                // Let queued search/art requests on this worker run between
+                // batches instead of waiting for the whole scan to finish.
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            }
         }
         m_db.commit();
         if (cold && !batch.isEmpty())
@@ -516,14 +547,14 @@ void MusicLibrary::scan(const QStringList &folders)
         return;
     }
 
-    // Prune rows whose files are gone.
+    // Prune rows whose files are gone (one prepared DELETE, re-bound per row).
     int pruned = 0;
+    QSqlQuery del(m_db);
+    del.prepare("DELETE FROM tracks WHERE path=?");
     for (auto it = cachedMtimes.cbegin(); it != cachedMtimes.cend(); ++it) {
         if (!seen.contains(it.key())) {
-            QSqlQuery q(m_db);
-            q.prepare("DELETE FROM tracks WHERE path=?");
-            q.addBindValue(it.key());
-            q.exec();
+            del.bindValue(0, it.key());
+            del.exec();
             changed = true;
             ++pruned;
         }
