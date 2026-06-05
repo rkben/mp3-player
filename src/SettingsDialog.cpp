@@ -17,8 +17,8 @@
 #include <QDir>
 
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
-                               Theme::Mode themeMode, QString themeFile,
-                               QWidget *parent)
+                               bool restoreQueue, Theme::Mode themeMode,
+                               QString themeFile, QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("Settings"));
@@ -41,6 +41,9 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_themeFileEdit->setPlaceholderText(tr("Path to a .qss stylesheet"));
     m_themeBrowse = new QPushButton(tr("Browse…"));
     m_themeBrowse->setMinimumHeight(34);
+
+    m_restoreQueue = new QCheckBox(tr("Restore the last queue on startup"));
+    m_restoreQueue->setChecked(restoreQueue);
 
     tabs->addTab(buildGeneralTab(), tr("General"));
 
@@ -96,6 +99,11 @@ bool SettingsDialog::autoSync() const
     return m_autoSync->isChecked();
 }
 
+bool SettingsDialog::restoreQueue() const
+{
+    return m_restoreQueue->isChecked();
+}
+
 Theme::Mode SettingsDialog::themeMode() const
 {
     return Theme::Mode(m_themeCombo->currentData().toInt());
@@ -118,6 +126,8 @@ QWidget *SettingsDialog::buildGeneralTab()
     fileRow->addWidget(m_themeFileEdit, 1);
     fileRow->addWidget(m_themeBrowse);
     form->addRow(tr("Stylesheet:"), fileRow);
+
+    form->addRow(tr("Startup:"), m_restoreQueue);
 
     return general;
 }

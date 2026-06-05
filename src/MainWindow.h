@@ -4,6 +4,7 @@
 
 #include "PlaylistModel.h"   // Track (for QList<Track> signal arg)
 #include "LibraryFolder.h"
+#include "PlaylistStore.h"
 
 class QLabel;
 class QSlider;
@@ -19,6 +20,8 @@ class QStandardItem;
 class QLineEdit;
 class QComboBox;
 class QTimer;
+class QListWidget;
+class QMenu;
 class CoverLabel;
 class PlayerController;
 class MusicLibrary;
@@ -52,6 +55,7 @@ private slots:
     void onTreeClicked(const QModelIndex &index);      // single-click: expand dirs
     void onTreeContextMenu(const QPoint &pos);
     void onQueueContextMenu(const QPoint &pos);
+    void onPlaylistContextMenu(const QPoint &pos);
     void onCurrentTrackChanged(const Track &track);
     void onQueueChanged(const QList<Track> &queue);
     void onPlaybackStateChanged(bool playing);
@@ -70,10 +74,17 @@ private:
     QWidget *buildQueuePanel();       // right: "Queue" label + search + queue table
     QWidget *buildTrackInfoPanel();   // bottom-left: album art + track metadata
     QList<Track> tracksForPath(const QString &path) const;   // file or folder -> tracks
+    QList<Track> tracksForPaths(const QStringList &paths) const;  // resolve via library
     void showTrackDetails(const Track &track);   // modal with full metadata + path
     void scheduleSearch();   // debounce, or restore library when cleared
     void showTrackInfo(const Track &track);   // populate the info panel
-    void updateQueueTitle();                  // "Queue (N)" from the queue size
+    void updateQueueTitle();                  // "<playlist>[ [modified]] (N)" header
+    QStringList queuePaths() const;           // local file paths of the current queue
+    void buildQueueMenu();                    // (re)populate the queue-actions dropdown
+    void addToPlaylistMenu(QMenu *menu, const QList<Track> &tracks);  // "Add to playlist"
+    void refreshPlaylists();                  // repopulate the Playlists tab list
+    void loadPlaylist(const QString &name);   // resolve + play, set current playlist
+    void setCurrentPlaylist(const QString &name, bool dirty);   // update header + persist
     void loadCover(const QString &artUrl);    // set the cover image (or placeholder)
     void startLibraryThread();
     void restoreSettings();
@@ -105,7 +116,10 @@ private:
     QSplitter *m_splitter;
     QSplitter *m_leftPanel;          // vertical: folder tabs over track info
     QTabWidget *m_leftTabs;
-    QLabel *m_queueTitle;            // "Queue (N)" header
+    QLabel *m_queueTitle;            // "<playlist>[ [modified]] (N)" header
+    QToolButton *m_queueMenuBtn = nullptr;   // queue-actions dropdown (Clear/Save/…)
+    QMenu *m_queueMenu = nullptr;
+    QListWidget *m_playlistList = nullptr;   // Playlists tab
     CoverLabel *m_coverArt;
     QLabel *m_infoTitle;
     QLabel *m_infoArtist;
@@ -137,4 +151,11 @@ private:
     bool m_compact = false;  // true = narrow/mobile single-panel layout
     QList<Track> m_fullLibrary;   // cached so search results can be cleared back
     bool m_searching = false;
+
+    PlaylistStore m_store;        // m3u8 playlists + resumable queue cache
+    QString m_currentPlaylist;    // empty = unsaved "Queue"; else the loaded playlist
+    bool m_queueDirty = false;    // queue diverged from the saved playlist
+    bool m_loadingPlaylist = false;   // guard: deliberate load shouldn't flag dirty
+    bool m_resumeQueue = true;    // ui/restoreQueue: repopulate the queue on launch
+    QStringList m_pendingResume;  // cached-queue paths, resolved on first libraryLoaded
 };

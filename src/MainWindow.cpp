@@ -31,6 +31,9 @@
 #include <QSlider>
 #include <QToolButton>
 #include <QMenu>
+#include <QListWidget>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QDialog>
 #include <QFormLayout>
 #include <QDialogButtonBox>
@@ -203,15 +206,19 @@ void MainWindow::buildUi()
     m_leftTabs->setDocumentMode(true);   // flat tab pane, no rounded frame
     m_leftTabs->addTab(m_tree, tr("Library"));
 
-    // Playlists tab — placeholder for now (saved playlists land here later).
-    auto *playlists = new QWidget;
-    auto *plLayout = new QVBoxLayout(playlists);
-    auto *plHint = new QLabel(tr("No playlists yet."));
-    plHint->setAlignment(Qt::AlignCenter);
-    plLayout->addStretch();
-    plLayout->addWidget(plHint);
-    plLayout->addStretch();
-    m_leftTabs->addTab(playlists, tr("Playlists"));
+    // Playlists tab — saved m3u8 playlists; double-click to load+play, right-click
+    // to manage. Populated from the store.
+    m_playlistList = new QListWidget;
+    m_playlistList->setFrameShape(QFrame::NoFrame);
+    m_playlistList->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_playlistList, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem *item) {
+                loadPlaylist(item->data(Qt::UserRole).toString());
+            });
+    connect(m_playlistList, &QListWidget::customContextMenuRequested, this,
+            &MainWindow::onPlaylistContextMenu);
+    m_leftTabs->addTab(m_playlistList, tr("Playlists"));
+    refreshPlaylists();
 
     // Left panel: folder tabs on top, now-playing track info (art + tags) below.
     m_leftPanel = new QSplitter(Qt::Vertical);
@@ -315,12 +322,24 @@ QWidget *MainWindow::buildQueuePanel()
 
     m_queueTitle = new QLabel;
     m_queueTitle->setObjectName("queueTitle");
+
+    // Queue-actions dropdown (Clear / Save / Save As / Append), rebuilt on show.
+    m_queueMenu = new QMenu(this);
+    connect(m_queueMenu, &QMenu::aboutToShow, this, &MainWindow::buildQueueMenu);
+    m_queueMenuBtn = new QToolButton;
+    m_queueMenuBtn->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+    m_queueMenuBtn->setAutoRaise(true);
+    m_queueMenuBtn->setToolTip(tr("Queue actions"));
+    m_queueMenuBtn->setPopupMode(QToolButton::InstantPopup);
+    m_queueMenuBtn->setMenu(m_queueMenu);
+
     updateQueueTitle();
 
     auto *searchRow = new QHBoxLayout;
     searchRow->setContentsMargins(8, 6, 8, 4);
     searchRow->setSpacing(6);
     searchRow->addWidget(m_queueTitle);
+    searchRow->addWidget(m_queueMenuBtn);
     searchRow->addStretch(1);   // push the search bits to the right
     searchRow->addWidget(m_scope);
     searchRow->addWidget(m_searchEdit);
@@ -650,11 +669,13 @@ void MainWindow::openSettings()
 {
     QSettings s;
     const bool curAutoSync = s.value("library/autoSync", false).toBool();
+    const bool curRestoreQueue = s.value("ui/restoreQueue", true).toBool();
     const Theme::Mode curTheme =
         Theme::modeFromString(s.value("ui/theme", "system").toString());
     const QString curThemeFile = s.value("ui/themeFile").toString();
 
-    SettingsDialog dlg(m_folders, curAutoSync, curTheme, curThemeFile, this);
+    SettingsDialog dlg(m_folders, curAutoSync, curRestoreQueue, curTheme,
+                       curThemeFile, this);
 
     // "Sync now" reconciles the configured folders (mtime diff) without closing
     // the dialog; the scan runs on the worker and updates the status.
@@ -673,6 +694,8 @@ void MainWindow::openSettings()
     }
 
     s.setValue("library/autoSync", dlg.autoSync());    // placeholder for now
+    s.setValue("ui/restoreQueue", dlg.restoreQueue());
+    m_resumeQueue = dlg.restoreQueue();
     s.setValue("ui/theme", Theme::modeToString(dlg.themeMode()));
     s.setValue("ui/themeFile", dlg.themeFile());
     Theme::apply(dlg.themeMode(), dlg.themeFile());
@@ -693,6 +716,21 @@ void MainWindow::openSettings()
 void MainWindow::onLibraryLoaded(const QList<Track> &tracks)
 {
     m_fullLibrary = tracks;        // browse source for the tree/search/enqueue
+    refreshPlaylists();            // now that durations can be resolved
+
+    // Resume the cached queue once the library is available to resolve metadata.
+    // Loaded silently (no autoplay) under the guard so it isn't flagged dirty.
+    if (!m_pendingResume.isEmpty()) {
+        const QList<Track> resumed = tracksForPaths(m_pendingResume);
+        m_pendingResume.clear();
+        if (!resumed.isEmpty()) {
+            m_loadingPlaylist = true;
+            m_controller->enqueue(resumed);
+            m_loadingPlaylist = false;
+            updateQueueTitle();
+        }
+    }
+
     seedReadyQueue();              // cold Play falls back to the whole library
 
     if (m_controller->hasTrack())
@@ -753,6 +791,16 @@ void MainWindow::restoreSettings()
     m_repeatState = s.value("playback/repeat", 0).toInt();
     m_controller->setRepeatMode(static_cast<PlayerController::RepeatMode>(m_repeatState));
     updateRepeatButton();
+
+    // Resumable queue: load the cached paths now, restore the header identity, and
+    // resolve to Tracks on the first libraryLoaded (the library isn't loaded yet).
+    m_resumeQueue = s.value("ui/restoreQueue", true).toBool();
+    if (m_resumeQueue) {
+        m_pendingResume = m_store.readQueueCache();
+        m_currentPlaylist = s.value("ui/currentPlaylist").toString();
+        m_queueDirty = s.value("ui/queueDirty", false).toBool();
+    }
+    updateQueueTitle();
 
     m_folders = loadLibraryFolders();
     rebuildTree();
@@ -955,13 +1003,15 @@ void MainWindow::onTreeContextMenu(const QPoint &pos)
             if (!tracks.isEmpty())
                 m_controller->enqueue(tracks);
         });
+        addToPlaylistMenu(&menu, tracksForPath(path));
     } else {
-        // Files: just show metadata.
+        // Files: show metadata, or add to a playlist.
         connect(menu.addAction(tr("Show info")), &QAction::triggered, this, [this, path] {
             const QList<Track> tracks = tracksForPath(path);
             if (!tracks.isEmpty())
                 showTrackDetails(tracks.first());
         });
+        addToPlaylistMenu(&menu, tracksForPath(path));
     }
     menu.exec(m_tree->viewport()->mapToGlobal(pos));
 }
@@ -979,6 +1029,7 @@ void MainWindow::onQueueContextMenu(const QPoint &pos)
     QMenu menu(this);
     connect(menu.addAction(tr("Show info")), &QAction::triggered, this,
             [this, track] { showTrackDetails(track); });
+    addToPlaylistMenu(&menu, {track});
     menu.exec(m_table->viewport()->mapToGlobal(pos));
 }
 
@@ -1047,36 +1098,231 @@ QList<Track> MainWindow::tracksForPath(const QString &path) const
     while (it.hasNext())
         files.append(it.next());
     files.sort(Qt::CaseInsensitive);
+    return tracksForPaths(files);
+}
 
-    // One hash, reused across the (potentially many) files in the folder.
+QList<Track> MainWindow::tracksForPaths(const QStringList &paths) const
+{
+    // Resolve each path to its library Track (full metadata), falling back to a
+    // minimal entry for files not in the library. One hash, reused across paths.
     QHash<QString, const Track *> byPath;
     byPath.reserve(m_fullLibrary.size());
     for (const Track &t : m_fullLibrary)
         byPath.insert(t.url.toLocalFile(), &t);
 
     QList<Track> out;
-    out.reserve(files.size());
-    for (const QString &p : files) {
-        if (const Track *t = byPath.value(p, nullptr))
+    out.reserve(paths.size());
+    for (const QString &p : paths) {
+        if (p.isEmpty())
+            continue;
+        if (const Track *t = byPath.value(p, nullptr)) {
             out.append(*t);
-        else
-            out.append(minimalTrack(p));
+        } else {
+            Track minimal;
+            minimal.url = QUrl::fromLocalFile(p);
+            minimal.title = QFileInfo(p).fileName();
+            out.append(minimal);
+        }
     }
     return out;
 }
 
 void MainWindow::updateQueueTitle()
 {
-    // QLocale groups digits per the user's locale (e.g. "1,000"). Constructing
-    // one is cheap but not free, and this is called on every queue change.
+    // Header is the current playlist's identity: its name (or "Queue" when no
+    // playlist is loaded), a [modified] marker when the queue has diverged, and
+    // the count. QLocale groups digits per the user's locale (e.g. "1,000").
     static const QLocale locale;
-    m_queueTitle->setText(tr("Queue (%1)")
-                              .arg(locale.toString(m_controller->queueSize())));
+    const QString base = m_currentPlaylist.isEmpty() ? tr("Queue") : m_currentPlaylist;
+    const QString modified = m_queueDirty ? tr(" [modified]") : QString();
+    qint64 total = 0;
+    for (const Track &t : m_controller->queue())
+        total += t.durationMs;
+    m_queueTitle->setText(QStringLiteral("%1%2 (%3 - %4)").arg(
+        base, modified, locale.toString(m_controller->queueSize()),
+        formatDurationLong(total)));
+}
+
+QStringList MainWindow::queuePaths() const
+{
+    QStringList paths;
+    const QList<Track> &q = m_controller->queue();
+    paths.reserve(q.size());
+    for (const Track &t : q)
+        paths << t.url.toLocalFile();
+    return paths;
+}
+
+void MainWindow::setCurrentPlaylist(const QString &name, bool dirty)
+{
+    m_currentPlaylist = name;
+    m_queueDirty = dirty;
+    QSettings s;
+    s.setValue("ui/currentPlaylist", name);
+    s.setValue("ui/queueDirty", dirty);
+    updateQueueTitle();
+}
+
+void MainWindow::refreshPlaylists()
+{
+    if (!m_playlistList)
+        return;
+    // One path->duration hash, reused across all playlists (durations are only
+    // known for library tracks; others contribute to the count but 0 duration).
+    QHash<QString, qint64> durByPath;
+    durByPath.reserve(m_fullLibrary.size());
+    for (const Track &t : m_fullLibrary)
+        durByPath.insert(t.url.toLocalFile(), t.durationMs);
+
+    m_playlistList->clear();
+    for (const QString &name : m_store.names()) {
+        const QStringList paths = m_store.readPaths(name);
+        qint64 total = 0;
+        for (const QString &p : paths)
+            total += durByPath.value(p, 0);
+        auto *item = new QListWidgetItem(
+            tr("%1  (%2 - %3)").arg(name).arg(paths.size())
+                .arg(formatDurationLong(total)));
+        item->setData(Qt::UserRole, name);   // the bare name, for load/rename/delete
+        m_playlistList->addItem(item);
+    }
+}
+
+void MainWindow::loadPlaylist(const QString &name)
+{
+    const QList<Track> tracks = tracksForPaths(m_store.readPaths(name));
+    if (tracks.isEmpty())
+        return;
+    m_loadingPlaylist = true;
+    m_controller->playQueue(tracks, 0);   // replace the queue and start playing
+    m_loadingPlaylist = false;
+    setCurrentPlaylist(name, /*dirty=*/false);
+}
+
+void MainWindow::buildQueueMenu()
+{
+    m_queueMenu->clear();
+    const bool hasQueue = m_controller->queueSize() > 0;
+    const QStringList playlists = m_store.names();
+
+    QAction *clear = m_queueMenu->addAction(tr("Clear"));
+    clear->setEnabled(hasQueue);
+    connect(clear, &QAction::triggered, this, [this] {
+        m_controller->clearQueue();
+        setCurrentPlaylist(QString(), /*dirty=*/false);   // close any active playlist
+    });
+
+    QAction *save = m_queueMenu->addAction(tr("Save"));
+    save->setEnabled(hasQueue && m_queueDirty && !m_currentPlaylist.isEmpty());
+    connect(save, &QAction::triggered, this, [this] {
+        if (m_store.write(m_currentPlaylist, queuePaths())) {
+            setCurrentPlaylist(m_currentPlaylist, /*dirty=*/false);
+            refreshPlaylists();
+        }
+    });
+
+    QAction *saveAs = m_queueMenu->addAction(tr("Save As…"));
+    saveAs->setEnabled(hasQueue);
+    connect(saveAs, &QAction::triggered, this, [this] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this, tr("Save playlist"), tr("Playlist name:"),
+            QLineEdit::Normal, m_currentPlaylist, &ok).trimmed();
+        if (!ok || name.isEmpty())
+            return;
+        if (m_store.exists(name)
+            && QMessageBox::question(this, tr("Overwrite playlist?"),
+                   tr("Playlist \"%1\" already exists. Overwrite it?").arg(name))
+                   != QMessageBox::Yes)
+            return;
+        if (m_store.write(name, queuePaths())) {
+            setCurrentPlaylist(name, /*dirty=*/false);
+            refreshPlaylists();
+        }
+    });
+
+    QMenu *append = m_queueMenu->addMenu(tr("Append to"));
+    append->setEnabled(hasQueue && !playlists.isEmpty());
+    for (const QString &name : playlists)
+        connect(append->addAction(name), &QAction::triggered, this,
+                [this, name] { m_store.append(name, queuePaths()); });
+}
+
+void MainWindow::addToPlaylistMenu(QMenu *menu, const QList<Track> &tracks)
+{
+    if (tracks.isEmpty())
+        return;
+    QStringList paths;
+    paths.reserve(tracks.size());
+    for (const Track &t : tracks)
+        paths << t.url.toLocalFile();
+
+    QMenu *sub = menu->addMenu(tr("Add to playlist"));
+    connect(sub->addAction(tr("New playlist…")), &QAction::triggered, this,
+            [this, paths] {
+                bool ok = false;
+                const QString name = QInputDialog::getText(
+                    this, tr("New playlist"), tr("Playlist name:"),
+                    QLineEdit::Normal, QString(), &ok).trimmed();
+                if (!ok || name.isEmpty())
+                    return;
+                m_store.exists(name) ? m_store.append(name, paths)
+                                     : m_store.write(name, paths);
+                refreshPlaylists();
+            });
+    const QStringList names = m_store.names();
+    if (!names.isEmpty())
+        sub->addSeparator();
+    for (const QString &name : names)
+        connect(sub->addAction(name), &QAction::triggered, this,
+                [this, name, paths] { m_store.append(name, paths); });
+}
+
+void MainWindow::onPlaylistContextMenu(const QPoint &pos)
+{
+    QListWidgetItem *item = m_playlistList->itemAt(pos);
+    if (!item)
+        return;
+    const QString name = item->data(Qt::UserRole).toString();
+
+    QMenu menu(this);
+    connect(menu.addAction(tr("Play")), &QAction::triggered, this,
+            [this, name] { loadPlaylist(name); });
+    connect(menu.addAction(tr("Rename…")), &QAction::triggered, this, [this, name] {
+        bool ok = false;
+        const QString to = QInputDialog::getText(
+            this, tr("Rename playlist"), tr("New name:"),
+            QLineEdit::Normal, name, &ok).trimmed();
+        if (ok && !to.isEmpty() && to != name) {
+            m_store.rename(name, to);
+            if (m_currentPlaylist == name)
+                setCurrentPlaylist(to, m_queueDirty);
+            refreshPlaylists();
+        }
+    });
+    connect(menu.addAction(tr("Delete")), &QAction::triggered, this, [this, name] {
+        if (QMessageBox::question(this, tr("Delete playlist"),
+                tr("Delete playlist \"%1\"?").arg(name)) == QMessageBox::Yes) {
+            m_store.remove(name);
+            if (m_currentPlaylist == name)
+                setCurrentPlaylist(QString(), m_queueDirty);
+            refreshPlaylists();
+        }
+    });
+    menu.exec(m_playlistList->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::onQueueChanged(const QList<Track> &queue)
 {
+    // A user-driven queue change diverges it from the saved playlist; a deliberate
+    // load (Playlists tab / resume) sets m_loadingPlaylist so it stays clean.
+    if (!m_loadingPlaylist) {
+        m_queueDirty = true;
+        QSettings().setValue("ui/queueDirty", m_queueDirty);
+    }
     updateQueueTitle();
+    m_store.saveQueueCache(queuePaths());   // keep the resumable cache current
+
     if (m_searching)
         return;   // search browse mode owns the table; restored when search clears
     m_model->setTracks(queue);

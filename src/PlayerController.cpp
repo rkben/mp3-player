@@ -103,6 +103,27 @@ void PlayerController::jumpTo(int index)
     recordHistory(index);
 }
 
+void PlayerController::clearQueue()
+{
+    if (hasTrack()) {
+        // Keep the playing track so audio (and now-playing) stay valid; drop the
+        // rest. It plays out, then pickNext finds nothing and playback stops.
+        m_queue = {m_queue.at(m_index)};
+        m_index = 0;
+        m_history = {0};
+        m_historyPos = 0;
+    } else {
+        m_queue.clear();
+        m_index = -1;
+        m_history.clear();
+        m_historyPos = -1;
+    }
+    m_consecutiveErrors = 0;
+    m_lastErrorIndex = -1;
+    m_metaResolvedIndex = -1;
+    emit queueChanged(m_queue);
+}
+
 void PlayerController::setReadyQueue(const QList<Track> &tracks)
 {
     // A silent fallback only: play() adopts it when the real queue is empty.

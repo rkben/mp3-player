@@ -4,3 +4,7 @@
 compile_commands.json
 tools/
 testdata/
+
+# Generated probes / fixtures (derived from a local music library)
+dates.tsv
+tests/year_cases.tsv

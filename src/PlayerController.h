@@ -43,6 +43,9 @@ public slots:
     void enqueue(const QList<Track> &tracks);
     // Play the queue item at `index` (e.g. double-clicking a queue row).
     void jumpTo(int index);
+    // Empty the queue. If a track is playing it is kept (as the sole entry) and
+    // keeps playing; when it ends the queue is exhausted and playback stops.
+    void clearQueue();
     // Load a queue but stay stopped (still "nothing playing"), so a later play()
     // — e.g. a media key / MPRIS Play before anything was clicked — can start it.
     // No-op while something is already playing/loaded.
