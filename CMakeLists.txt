@@ -70,15 +70,6 @@ endif()
 
 message(STATUS "MPRIS D-Bus support: ${ENABLE_MPRIS}")
 
-# ---- Install (used for packaging, e.g. the AppImage build) ----
-include(GNUInstallDirs)
-install(TARGETS mp3player RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES packaging/pocketplayer.desktop
-        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
-install(FILES resources/icons/album_icon.svg
-        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
-        RENAME pocketplayer.svg)
-
 # ---- Tests ----
 enable_testing()
 qt_add_executable(year_test tests/YearParserTest.cpp src/YearParser.cpp src/YearParser.h)

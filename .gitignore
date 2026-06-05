@@ -2,8 +2,5 @@
 *.user
 .cache/
 compile_commands.json
-build-appimage/
-AppDir/
 tools/
 testdata/
-*.AppImage

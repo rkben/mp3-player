@@ -45,18 +45,6 @@ cmake --build build -j
 
 e.g. `cmake -B build -S . -DENABLE_MPRIS=OFF`
 
-## AppImage
-
-A self-contained AppImage (bundles Qt, the svg + ffmpeg multimedia plugins, and
-TagLib) can be built with:
-
-```sh
-./scripts/build-appimage.sh
-```
-
-Needs `qmake6` on `PATH` (Arch: `qt6-base`) and network access the first time to
-fetch `linuxdeploy`. Produces `Pocket_Player-x86_64.AppImage` in the repo root.
-
 ## Layout
 
 | File | Role |
