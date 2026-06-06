@@ -1,0 +1,134 @@
+Pass 2 — re-evaluation at commit 016b474 (Opus 4.8, max effort)
+
+Read every non-shader source file in the tree (ShaderArt.*, demo/, visualizer/
+excluded at the user's request). The build is current and a headless offscreen
+smoke run starts clean.
+
+Headline: this is high-quality, well-architected, consistently-commented code —
+well above what the README disclaimer ("low effort, haven't read anything")
+implies. Nearly every finding from pass 1 (39881cf) is fixed in this tree:
+  - audio globs deduped into the shared AudioFormats.h
+  - playRowForPath O(n) -> PlaylistModel::rowForKey O(1) hash
+  - upsert prepared once and hoisted out of the scan loop (prepareUpsert)
+  - re-tagged files now refresh art (upsert nulls art_url on mtime change)
+  - position-tick churn gated by m_lastElapsedSec; formatTime is QStringLiteral
+  - volume persisted on sliderReleased, not every valueChanged
+  - SQLite "library" connection closed + removeDatabase in ~MusicLibrary
+  - tree double-click no longer both toggles and enqueues (ExpandsOnDoubleClick off)
+  - "merge only non-empty fields" consolidated into Track::mergeFrom
+  - cold scan no longer starves the worker (processEvents pump every kPumpEvery)
+  - dead m_duration, stale QSpinBox include/decl, magic 3000/4000/220 all gone
+
+What remains at 016b474 follows, in the same three lenses as pass 1.
+
+---
+Pass 1 — Code quality & uniformity
+
+1. Dead constant kStatusTimeoutMs
+MainWindow.cpp:81 defines `constexpr int kStatusTimeoutMs = 4000` but nothing
+references it — the status bar is shown/hidden directly (onScanStatus,
+onScanProgress), never timed out. Remove it, or wire the transient-status timeout
+it implies.
+
+2. MPRIS semantic looseness (cosmetic)
+MprisPlayerAdaptor::canGoPrevious() returns canGoNext() (MprisController.cpp:89) —
+i.e. "queue non-empty", not "is there a previous". And MprisRootAdaptor::
+supportedUriSchemes advertises only "file" (:34) though the app streams http(s).
+Harmless (OpenUri is a no-op anyway), but both read as not-quite-right to anyone
+inspecting the bus interface.
+
+3. Stubbed "Auto sync" control is user-visible
+SettingsDialog.cpp:247-251 adds an "Automatically sync the library" checkbox whose
+own tooltip says "(Not implemented yet.)"; the value is persisted but only feeds a
+"// placeholder for now" line (MainWindow.cpp:896). Fine as a deliberate stub —
+worth either hiding until it does something or tracking so it isn't forgotten.
+
+---
+Pass 2 — Bugs & pitfalls
+
+1. DB transaction re-entrancy during a cold scan (most impactful)
+scan() pumps the worker event loop with processEvents every kPumpEvery files
+*while a write transaction is open* (MusicLibrary.cpp:589-593). Queued slots are
+delivered during that pump. Most are safe — search(), resolveArt(), and
+enrichMetadata() issue no explicit transaction, so their statements simply join
+the scan's open batch. But importTracks() runs its own m_db.transaction() /
+m_db.commit() (MusicLibrary.cpp:281, 303). SQLite has no nested transactions: the
+inner commit() ends the scan's batch early, the scan's next commit() warns ("no
+transaction active"), and importTracks fires a full libraryLoaded(loadAll())
+mid-append — transiently duplicating rows in MainWindow::m_fullLibrary until the
+scan's final reload snaps it back. No corruption (SQLite won't corrupt; worst case
+is early-committed batches + benign warnings + a flicker of duplicate browse rows).
+Window is narrow: a URL import has to finish *while the first cold scan is still in
+its parse loop*. Cheapest fix: guard importTracks() (and any other transaction
+user) against running while m_scanning — defer/re-queue it — or don't pump inside
+the transaction.
+
+2. Shuffle has no bag (by-design limitation)
+pickNext() in shuffle only avoids the immediate repeat (PlayerController.cpp:308-
+315): it can replay a track two songs later and never guarantees the queue is
+traversed before repeating. Paired with kMaxHistory = 6 (:109), "previous" can only
+walk back 5 shuffled tracks. Acceptable for a small player; a shuffle bag (permuted
+order, refilled on exhaustion) is the natural upgrade.
+
+3. Unbounded concurrent yt-dlp on rapid remote skips
+RemoteResolver::resolve spawns a fresh QProcess per call (RemoteResolver.cpp:46)
+and never cancels an in-flight one; skipping quickly through remote tracks starts
+several yt-dlp processes at once. Correct (results are matched by pageUrl and stale
+ones are dropped by the hasTrack()/m_current.url guard in PlayerController), just
+wasteful. The header even notes "multiple in-flight resolves are fine." A
+cancel-previous-on-new-resolve would be tidier.
+
+4. m_consecutiveErrors not reset on history navigation (edge)
+next()/previous() replay through m_history (PlayerController.cpp:210-214, 236-240)
+without resetting m_consecutiveErrors; it's only cleared on a successful Playing
+state (onPlaybackStateChanged) or an explicit jumpTo/playQueue. Stepping through a
+history window of erroring tracks could trip the "all bad, stop" guard
+(skipBadTrack, :356) earlier than expected. Needs a run of bad files to manifest.
+
+5. Year heuristic can misread a year-less date field (low)
+parseTags falls back to the first \d{4} run in DATE/ORIGINALDATE/YEAR/ORIGINALYEAR,
+bounded 1000-9999 (MusicLibrary.cpp:228-240). A field carrying only e.g. a
+MMDD-style value with no year could be read as a bogus year. Rare, and a reasonable
+simplification of the deleted YearParser — noting the trade-off, not asking to undo
+it.
+
+Verified NOT bugs (checked deliberately):
+- Mid-scan interactive queries are safe except for importTracks: search/resolveArt/
+  enrichMetadata carry no explicit transaction, so they ride the scan's batch.
+- QList<Track> passed through queued signals is copy-on-write — the cross-thread
+  "copies" (libraryLoaded, setReadyQueue(m_fullLibrary)) are O(1) until mutated, so
+  the apparent 45k-element copies are cheap. The design leans on this correctly.
+- No art re-request loop: double-guarded by `changed` (onCurrentTrackChanged) and
+  the artUrl == short-circuit in PlayerController::setCurrentArt.
+- FTS5 search is injection-safe: buildMatchQuery strips all non-alphanumerics before
+  building the MATCH expr; the Year scope reduces input to digits.
+- All-bad-queue termination is correct: ++m_consecutiveErrors >= m_queue.size()
+  stops after trying each entry once (and a detached/empty queue stops immediately).
+- DB thread-affinity is correct: connection opened, used, and torn down on the
+  worker thread.
+
+---
+Pass 3 — Optimization (power-conscious is the stated goal)
+
+1. Full queue cache rewritten on every queue mutation
+onQueueChanged calls m_store.saveQueueCache(queueStoredPaths()) on *each*
+queueChanged (MainWindow.cpp:1671) — including every single-track enqueue. Building
+a large queue one track at a time (repeated tree double-clicks / "Add to queue") is
+then O(n^2) synchronous disk writes on the GUI thread. Fine for typical sizes; a
+"Play library" of 45k writes a 45k-line m3u8 once on the UI thread, which is a
+noticeable hitch. Debounce the cache write (a short single-shot timer), or skip it
+while m_loadingPlaylist, or move it off-thread.
+
+2. Cover decoded synchronously on the GUI thread per track change
+loadCover does QPixmap(QUrl(artUrl).toLocalFile()) inline (MainWindow.cpp:541-547),
+decoding the image on the GUI thread on every track change. Small embedded covers
+are cheap; a large folder cover.jpg is a brief per-track hitch. Decode on the
+worker (it already touches these files in extractArt) or cache the scaled pixmap.
+
+Note (not a finding): the 2-thread parse cap (MusicLibrary.cpp:543) remains a
+deliberate, documented power trade-off — leave it.
+
+---
+Overall: none of the above are crashes or data-loss bugs. Bugs #1 is the only true
+soundness gap and it's narrow. The codebase is in good shape and has clearly been
+iterated, not dumped.
