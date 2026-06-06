@@ -3,13 +3,17 @@
 #include "PlayerController.h"
 #include "SettingsDialog.h"
 #include "MusicLibrary.h"
+#include "RemoteResolver.h"
 #include "CoverLabel.h"
 #include "Theme.h"
 #include "AudioFormats.h"
 #include "TimeFormat.h"
-#ifdef HAVE_MPRIS
-#include "MprisController.h"
-#endif
+#include "TrackUri.h"
+#include "Toast.h"
+#include "Notifier.h"
+#include "Importer.h"
+#include "ImportDialog.h"
+#include "MediaSession.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -23,6 +27,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QDesktopServices>
 #include <QHash>
 #include <QLineEdit>
 #include <QComboBox>
@@ -32,10 +37,13 @@
 #include <QToolButton>
 #include <QMenu>
 #include <QListWidget>
+#include <QPushButton>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QDialog>
 #include <QFormLayout>
+#include <QPlainTextEdit>
+#include <QFontDatabase>
 #include <QDialogButtonBox>
 #include <QStyle>
 #include <QIcon>
@@ -57,7 +65,18 @@ enum TreeRole {
     PathRole = Qt::UserRole + 1,   // absolute filesystem path (empty for none)
     IsDirRole,                     // bool: directory vs. audio file
     PopulatedRole,                 // bool: children have been lazily loaded
+    KeyRole,                       // virtual-tree leaf: a track key (url string)
+    IsGroupRole,                   // virtual-tree grouping node (artist/album/host)
 };
+
+// A leaf is an enqueueable track: a virtual-tree leaf (carries a key) or a
+// filesystem file (has a path, isn't a directory). Everything else is a group.
+bool isLeafNode(const QModelIndex &i)
+{
+    if (!i.data(KeyRole).toString().isEmpty())
+        return true;
+    return !i.data(PathRole).toString().isEmpty() && !i.data(IsDirRole).toBool();
+}
 
 constexpr int kStatusTimeoutMs = 4000;   // how long a transient status line lingers
 constexpr int kSearchDebounceMs = 220;   // idle time after typing before searching
@@ -126,21 +145,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &PlayerController::durationChanged,
             this, &MainWindow::onDurationChanged);
     connect(m_controller, &PlayerController::trackError, this,
-            [this](const QString &name, const QString &msg) {
-                const QString text = tr("Skipped %1 — %2").arg(name, msg);
-                m_status->setText(text);
-                m_status->show();
-                // Transient: clear it after a few seconds (unless superseded).
-                QTimer::singleShot(kStatusTimeoutMs, this, [this, text] {
-                    if (m_status->text() == text)
-                        m_status->hide();
-                });
+            [](const QString &name, const QString &msg) {
+                ToastArea::post(tr("Skipped %1 — %2").arg(name, msg));
             });
     connect(m_controller, &PlayerController::metadataResolved, this,
             [this](const QUrl &url, const QString &title, const QString &artist,
                    const QString &album, int trackNo, qint64 durationMs) {
                 // Update the matching view row (if present) and persist to the DB.
-                const int row = playRowForPath(url.toLocalFile());
+                const int row = playRowForKey(url);
                 if (row >= 0)
                     m_model->updateTrack(row, title, artist, album, durationMs, trackNo);
                 if (m_controller->currentTrack().url == url) {
@@ -172,9 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
                 QSettings().setValue("playback/repeat", m_repeatState);
             });
 
-#ifdef HAVE_MPRIS
-    m_mpris = new MprisController(m_controller, this, this);
-#endif
+    m_session = MediaSession::create(m_controller, this, this);   // null if none
 
     startLibraryThread();
     restoreSettings();
@@ -215,8 +225,39 @@ void MainWindow::startLibraryThread()
     connect(m_library, &MusicLibrary::tracksAppended, this, &MainWindow::onTracksAppended);
     connect(m_library, &MusicLibrary::scanProgress, this, &MainWindow::onScanProgress);
     connect(m_library, &MusicLibrary::scanStatus, this, &MainWindow::onScanStatus);
+    connect(this, &MainWindow::importTracks, m_library, &MusicLibrary::importTracks);
 
     m_libThread->start();
+
+    // yt-dlp importer (GUI thread; async QProcess). Inserts remote tracks via the
+    // library worker, then creates/appends a playlist and notifies.
+    m_importer = new Importer(this);
+    connect(m_importer, &Importer::status, this, &MainWindow::onScanStatus);  // reuse status bar
+    connect(m_importer, &Importer::trackFailed, this,
+            [](const QString &msg) { ToastArea::post(msg); });
+    connect(m_importer, &Importer::failed, this, [](const QString &msg) {
+        Notifier::notify(tr("Import failed"), msg);
+    });
+    connect(m_importer, &Importer::finished, this,
+            [this](const QList<Track> &tracks, const QString &createName,
+                   const QString &appendName) {
+                if (tracks.isEmpty())
+                    return;
+                emit importTracks(tracks);   // worker inserts + re-emits libraryLoaded
+
+                QStringList lines;
+                lines.reserve(tracks.size());
+                for (const Track &t : tracks)
+                    lines << storedForm(t.url);
+                if (!createName.isEmpty())
+                    m_store.write(createName, lines);
+                else if (!appendName.isEmpty())
+                    m_store.append(appendName, lines);
+                refreshPlaylists();
+
+                Notifier::notify(tr("Import complete"),
+                                 tr("Added %n track(s).", nullptr, int(tracks.size())));
+            });
 }
 
 void MainWindow::buildUi()
@@ -231,30 +272,29 @@ void MainWindow::buildUi()
     // No top title bar: the now-playing track goes in the window title, and the
     // settings button lives in the transport bar.
 
-    // --- Left panel: a "Library" tree whose top level is each configured
-    // folder's label, with its directory contents lazily loaded underneath. ---
+    // --- Left panel: two tabs (Library / Playlists). Library is the filesystem
+    // tree of the configured folders, plus a "Remote" root for streamed tracks. ---
     m_treeModel = new QStandardItemModel(this);
-
     m_tree = new QTreeView;
     m_tree->setModel(m_treeModel);
     m_tree->setHeaderHidden(true);
     m_tree->setFrameShape(QFrame::NoFrame);   // no rounded frame border (any style)
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setAnimated(true);
-    m_tree->setExpandsOnDoubleClick(false);   // single-click expands; dbl-click enqueues files
+    m_tree->setExpandsOnDoubleClick(false);   // single-click expands; dbl-click enqueues
+    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
     connect(m_tree, &QTreeView::doubleClicked, this, &MainWindow::onTreeActivated);
-    connect(m_tree, &QTreeView::expanded, this, &MainWindow::onTreeExpanded);
-    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeView::customContextMenuRequested,
             this, &MainWindow::onTreeContextMenu);
+    connect(m_tree, &QTreeView::expanded, this, &MainWindow::onTreeExpanded);  // lazy dirs
 
     m_leftTabs = new QTabWidget;
     m_leftTabs->setDocumentMode(true);   // flat tab pane, no rounded frame
     m_leftTabs->addTab(m_tree, tr("Library"));
 
-    // Playlists tab — saved m3u8 playlists; double-click to load+play, right-click
-    // to manage. Populated from the store.
+    // Playlists tab — Create/Import buttons over the saved m3u8 list; double-click
+    // a row to load+play, right-click to manage.
     m_playlistList = new QListWidget;
     m_playlistList->setFrameShape(QFrame::NoFrame);
     m_playlistList->setItemDelegate(new PlaylistItemDelegate(m_playlistList));
@@ -265,7 +305,25 @@ void MainWindow::buildUi()
             });
     connect(m_playlistList, &QListWidget::customContextMenuRequested, this,
             &MainWindow::onPlaylistContextMenu);
-    m_leftTabs->addTab(m_playlistList, tr("Playlists"));
+
+    auto *plButtons = new QHBoxLayout;
+    plButtons->setContentsMargins(6, 6, 6, 0);
+    auto *createBtn = new QPushButton(tr("Create"));
+    auto *importBtn = new QPushButton(tr("Import"));
+    importBtn->setToolTip(tr("Import a track or playlist from a URL (yt-dlp)"));
+    connect(createBtn, &QPushButton::clicked, this, &MainWindow::createPlaylist);
+    connect(importBtn, &QPushButton::clicked, this, &MainWindow::importFromUrl);
+    plButtons->addWidget(createBtn);
+    plButtons->addWidget(importBtn);
+    plButtons->addStretch(1);
+
+    auto *playlistTab = new QWidget;
+    auto *plLayout = new QVBoxLayout(playlistTab);
+    plLayout->setContentsMargins(0, 0, 0, 0);
+    plLayout->setSpacing(4);
+    plLayout->addLayout(plButtons);
+    plLayout->addWidget(m_playlistList, 1);
+    m_leftTabs->addTab(playlistTab, tr("Playlists"));
     refreshPlaylists();
 
     // Left panel: folder tabs on top, now-playing track info (art + tags) below.
@@ -296,6 +354,10 @@ void MainWindow::buildUi()
     m_status->hide();
     root->addWidget(m_status);
 
+    // In-app toast overlay: a transparent child spanning the window. Registers
+    // itself so ToastArea::post() works from anywhere (incl. worker threads).
+    new ToastArea(this);
+
     // Theming is applied application-wide (see Theme::apply, called at startup
     // and from the settings dialog) so it can be swapped at runtime. The default
     // is System, i.e. the native KDE/platform theme.
@@ -325,12 +387,16 @@ QWidget *MainWindow::buildQueuePanel()
     m_table->verticalHeader()->setDefaultSectionSize(26);
     QHeaderView *hh = m_table->horizontalHeader();
     hh->setHighlightSections(false);
-    hh->setSectionResizeMode(PlaylistModel::Title,    QHeaderView::Stretch);
-    hh->setSectionResizeMode(PlaylistModel::Artist,   QHeaderView::Interactive);
-    hh->setSectionResizeMode(PlaylistModel::Album,    QHeaderView::Stretch);
-    hh->setSectionResizeMode(PlaylistModel::Year,     QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(PlaylistModel::TrackNo,  QHeaderView::ResizeToContents);
-    hh->setSectionResizeMode(PlaylistModel::Duration, QHeaderView::ResizeToContents);
+    // Every column user-resizable (Stretch/ResizeToContents would lock the width
+    // so only one column dragged). The last section stretches to fill the panel.
+    hh->setSectionResizeMode(QHeaderView::Interactive);
+    hh->setStretchLastSection(true);
+    hh->resizeSection(PlaylistModel::Title,    220);
+    hh->resizeSection(PlaylistModel::Artist,   150);
+    hh->resizeSection(PlaylistModel::Album,    180);
+    hh->resizeSection(PlaylistModel::Year,     56);
+    hh->resizeSection(PlaylistModel::TrackNo,  44);
+    hh->resizeSection(PlaylistModel::Duration, 64);
     m_table->sortByColumn(-1, Qt::AscendingOrder);   // default: keep DB/result order
     // Only doubleClicked — `activated` also fires on a double-click (and on Enter),
     // so connecting both ran the handler twice per double-click.
@@ -617,6 +683,7 @@ QWidget *MainWindow::buildTransportBar()
 void MainWindow::rebuildTree()
 {
     m_treeModel->clear();
+    appendRemoteNode();   // "Remote" virtual root on top, when remote tracks exist
     const QIcon dirIcon = style()->standardIcon(QStyle::SP_DirIcon);
 
     for (const LibraryFolder &f : m_folders) {
@@ -635,7 +702,10 @@ void MainWindow::rebuildTree()
 
 void MainWindow::populateNode(QStandardItem *item)
 {
-    if (!item || item->data(PopulatedRole).toBool())
+    // Only filesystem nodes are lazily populated; virtual nodes (Remote subtree)
+    // are built eagerly and carry no path, so leave them untouched.
+    if (!item || item->data(PopulatedRole).toBool()
+        || item->data(PathRole).toString().isEmpty())
         return;
     item->setData(true, PopulatedRole);
     item->removeRows(0, item->rowCount());   // drop the placeholder
@@ -678,11 +748,90 @@ void MainWindow::onTreeExpanded(const QModelIndex &index)
     populateNode(m_treeModel->itemFromIndex(index));
 }
 
-int MainWindow::playRowForPath(const QString &path) const
+QStringList MainWindow::keysForIndex(const QModelIndex &index) const
 {
-    // O(1) via the model's path index — this is hit several times per track
+    if (!index.isValid())
+        return {};
+    // Filesystem node (file or folder): resolve via its path — walks the folder.
+    const QString path = index.data(PathRole).toString();
+    if (!path.isEmpty())
+        return audioPathsForPath(path);
+    // Virtual leaf: its own key, normalised to the stored form (plain path for
+    // local tracks, URL for remote) for clean playlist files.
+    const QString key = index.data(KeyRole).toString();
+    if (!key.isEmpty())
+        return {storedForm(QUrl(key))};
+    // Virtual group (artist/album/host/Remote): gather all descendant leaves.
+    QStringList out;
+    const QAbstractItemModel *m = index.model();
+    const int rows = m->rowCount(index);
+    for (int r = 0; r < rows; ++r)
+        out += keysForIndex(m->index(r, 0, index));
+    return out;
+}
+
+void MainWindow::appendRemoteNode()
+{
+    // "Remote" root: host → playlist title → track over the remote subset of the
+    // library. Small (a handful of imports), so eager. The playlist title is the
+    // track's album field (importer folds yt-dlp playlist_title into it).
+    QList<const Track *> remotes;
+    for (const Track &t : m_fullLibrary)
+        if (t.isRemote())
+            remotes.append(&t);
+    if (remotes.isEmpty())
+        return;
+
+    const QIcon groupIcon = style()->standardIcon(QStyle::SP_DirIcon);
+    const QIcon fileIcon = style()->standardIcon(QStyle::SP_FileIcon);
+    auto makeGroup = [&groupIcon](const QString &label) {
+        auto *g = new QStandardItem(groupIcon, label);
+        g->setData(true, IsGroupRole);
+        g->setData(true, PopulatedRole);
+        return g;
+    };
+
+    auto *root = makeGroup(tr("Remote"));
+    // host -> playlist group items, created on first use.
+    QHash<QString, QStandardItem *> hostItems, playlistItems;
+    for (const Track *t : remotes) {
+        const QString host = t->url.host().isEmpty() ? tr("Unknown") : t->url.host();
+        const QString playlist = t->album.isEmpty() ? tr("Unknown") : t->album;
+
+        QStandardItem *&hostItem = hostItems[host];
+        if (!hostItem) { hostItem = makeGroup(host); root->appendRow(hostItem); }
+        const QString plKey = host + '\x1f' + playlist;
+        QStandardItem *&plItem = playlistItems[plKey];
+        if (!plItem) { plItem = makeGroup(playlist); hostItem->appendRow(plItem); }
+
+        auto *leaf = new QStandardItem(fileIcon, t->title);
+        leaf->setData(t->key(), KeyRole);
+        leaf->setToolTip(t->url.toString());
+        plItem->appendRow(leaf);
+    }
+    m_treeModel->insertRow(0, root);   // always the top-most Library node
+}
+
+void MainWindow::refreshRemoteNode()
+{
+    // Replace just the Remote root, leaving the filesystem folder nodes (and their
+    // expansion state) untouched.
+    for (int r = 0; r < m_treeModel->rowCount(); ++r) {
+        QStandardItem *it = m_treeModel->item(r);
+        if (it && it->data(IsGroupRole).toBool()
+            && it->data(PathRole).toString().isEmpty()) {
+            m_treeModel->removeRow(r);
+            break;
+        }
+    }
+    appendRemoteNode();
+}
+
+int MainWindow::playRowForKey(const QUrl &url) const
+{
+    // O(1) via the model's key index — this is hit several times per track
     // change (highlight, art, metadata), so a linear scan over a 45k queue hurt.
-    return m_model->rowForPath(path);
+    return m_model->rowForKey(url.toString(QUrl::FullyEncoded));
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
@@ -719,12 +868,14 @@ void MainWindow::openSettings()
     const bool curAutoSync = s.value("library/autoSync", false).toBool();
     const bool curRestoreQueue = s.value("ui/restoreQueue", true).toBool();
     const bool curAutoPlay = s.value("ui/autoPlay", false).toBool();
+    const QString curYtDlp = RemoteResolver::ytDlpPath();   // configured, else $PATH
+    const QByteArray curAudioDev = s.value("audio/outputDevice").toByteArray();
     const Theme::Mode curTheme =
         Theme::modeFromString(s.value("ui/theme", "system").toString());
     const QString curThemeFile = s.value("ui/themeFile").toString();
 
     SettingsDialog dlg(m_folders, curAutoSync, curRestoreQueue, curAutoPlay,
-                       curTheme, curThemeFile, this);
+                       curYtDlp, curAudioDev, curTheme, curThemeFile, this);
 
     // "Sync now" reconciles the configured folders (mtime diff) without closing
     // the dialog; the scan runs on the worker and updates the status.
@@ -747,6 +898,9 @@ void MainWindow::openSettings()
     m_resumeQueue = dlg.restoreQueue();
     s.setValue("ui/autoPlay", dlg.autoPlay());
     m_autoPlay = dlg.autoPlay();
+    s.setValue("ytdlp/path", dlg.ytDlpPath());
+    s.setValue("audio/outputDevice", dlg.audioDeviceId());
+    m_controller->setAudioDevice(dlg.audioDeviceId());
     s.setValue("ui/theme", Theme::modeToString(dlg.themeMode()));
     s.setValue("ui/themeFile", dlg.themeFile());
     Theme::apply(dlg.themeMode(), dlg.themeFile());
@@ -767,12 +921,17 @@ void MainWindow::openSettings()
 void MainWindow::onLibraryLoaded(const QList<Track> &tracks)
 {
     m_fullLibrary = tracks;        // browse source for the tree/search/enqueue
+    m_libIndexByKey.clear();       // rebuild the key->index lookup for tracksForKeys
+    m_libIndexByKey.reserve(m_fullLibrary.size());
+    for (int i = 0; i < m_fullLibrary.size(); ++i)
+        m_libIndexByKey.insert(m_fullLibrary.at(i).key(), i);
     refreshPlaylists();            // now that durations can be resolved
+    refreshRemoteNode();           // Remote root in the Library tree
 
     // Resume the cached queue once the library is available to resolve metadata.
     // Loaded silently (no autoplay) under the guard so it isn't flagged dirty.
     if (!m_pendingResume.isEmpty()) {
-        const QList<Track> resumed = tracksForPaths(m_pendingResume);
+        const QList<Track> resumed = tracksForKeys(m_pendingResume);
         m_pendingResume.clear();
         if (!resumed.isEmpty()) {
             m_loadingPlaylist = true;
@@ -803,7 +962,10 @@ void MainWindow::onLibraryLoaded(const QList<Track> &tracks)
 
 void MainWindow::onTracksAppended(const QList<Track> &tracks)
 {
+    const int first = m_fullLibrary.size();
     m_fullLibrary.append(tracks);   // grow the browse source; queue view untouched
+    for (int i = first; i < m_fullLibrary.size(); ++i)   // keep the index in sync
+        m_libIndexByKey.insert(m_fullLibrary.at(i).key(), i);
 }
 
 void MainWindow::onSearchResults(const QString &query, const QList<Track> &tracks)
@@ -814,11 +976,15 @@ void MainWindow::onSearchResults(const QString &query, const QList<Track> &track
     m_model->setTracks(tracks);   // browse mode: double-click a result to enqueue
 }
 
-void MainWindow::onScanProgress(int done, int total)
+void MainWindow::onScanProgress(int done, int total, const QString &sourceLabel,
+                                const QString &fileName)
 {
     if (total <= 0)
         return;
-    m_status->setText(tr("Scanning… %L1 / %L2").arg(done).arg(total));
+    const QString src = sourceLabel.isEmpty() ? tr("library") : sourceLabel;
+    m_status->setText(tr("Importing from %1 (%L2/%L3): %4")
+                          .arg(src).arg(done).arg(total).arg(fileName));
+    m_status->show();
 }
 
 void MainWindow::onScanStatus(const QString &message)
@@ -842,6 +1008,10 @@ void MainWindow::restoreSettings()
 
     const int vol = s.value("playback/volume", 80).toInt();
     m_volume->setValue(vol);                       // emits valueChanged -> sets volume
+
+    // Push the saved output device to the engine; empty (the default) means follow
+    // the OS. The engine caches it and applies once its QAudioOutput is up.
+    m_controller->setAudioDevice(s.value("audio/outputDevice").toByteArray());
 
     const bool shuffle = s.value("playback/shuffle", false).toBool();
     m_shuffleBtn->setChecked(shuffle);             // emits toggled -> controller
@@ -891,8 +1061,15 @@ void MainWindow::restoreUiState()
         m_splitter->restoreState(s.value("ui/splitter").toByteArray());
     if (s.contains("ui/leftPanel"))
         m_leftPanel->restoreState(s.value("ui/leftPanel").toByteArray());
-    if (s.contains("ui/tableHeader"))
-        m_table->horizontalHeader()->restoreState(s.value("ui/tableHeader").toByteArray());
+    if (s.contains("ui/tableHeader")) {
+        QHeaderView *hh = m_table->horizontalHeader();
+        hh->restoreState(s.value("ui/tableHeader").toByteArray());
+        // restoreState() also restores per-section resize *modes*, which would
+        // bring back an old non-resizable (Stretch) config. Re-assert Interactive
+        // so every column stays user-draggable; the restored widths are kept.
+        hh->setSectionResizeMode(QHeaderView::Interactive);
+        hh->setStretchLastSection(true);
+    }
 }
 
 void MainWindow::cycleRepeat()
@@ -1007,7 +1184,7 @@ void MainWindow::startAutoPlay()
 
 void MainWindow::highlightPlaying(const QUrl &url, bool scroll)
 {
-    const int row = playRowForPath(url.toLocalFile());
+    const int row = playRowForKey(url);
     if (row < 0)
         return;   // not in the current view (e.g. filtered out)
     const QModelIndex proxyIdx = m_proxy->mapFromSource(m_model->index(row, 0));
@@ -1044,51 +1221,79 @@ void MainWindow::onTrackActivated(const QModelIndex &index)
 
 void MainWindow::onTreeClicked(const QModelIndex &index)
 {
-    // Single click on a folder toggles its expansion (no need to hit the arrow).
-    if (index.isValid() && index.data(IsDirRole).toBool())
-        m_tree->setExpanded(index, !m_tree->isExpanded(index));
+    // Single click on a group node toggles its expansion (no need to hit the arrow).
+    auto *tree = qobject_cast<QTreeView *>(sender());
+    if (tree && index.isValid() && !isLeafNode(index))
+        tree->setExpanded(index, !tree->isExpanded(index));
 }
 
 void MainWindow::onTreeActivated(const QModelIndex &index)
 {
-    // Double-click a file to enqueue it. Directories only expand (single-click);
-    // their "Add to queue" / "Play now" live in the right-click menu.
-    if (!index.isValid() || index.data(IsDirRole).toBool())
+    // Double-click a leaf to enqueue it. Groups only expand (single-click); their
+    // "Add to queue" / "Play now" live in the right-click menu.
+    if (!index.isValid() || !isLeafNode(index))
         return;
-    const QList<Track> add = tracksForPath(index.data(PathRole).toString());
+    const QList<Track> add = tracksForKeys(keysForIndex(index));
     if (!add.isEmpty())
         m_controller->enqueue(add);
 }
 
 void MainWindow::onTreeContextMenu(const QPoint &pos)
 {
-    const QModelIndex index = m_tree->indexAt(pos);
+    auto *tree = qobject_cast<QTreeView *>(sender());
+    if (!tree)
+        return;
+    const QModelIndex index = tree->indexAt(pos);
     if (!index.isValid())
         return;
-    const QString path = index.data(PathRole).toString();
+    // Resolve keys lazily on click — gathering a big group's descendants (or
+    // walking a folder) must not stall the menu popup. Persistent so it stays
+    // valid for the menu's lifetime.
+    const QPersistentModelIndex pidx(index);
+    auto keys = [this, pidx] { return pidx.isValid() ? keysForIndex(pidx) : QStringList{}; };
 
     QMenu menu(this);
-    if (index.data(IsDirRole).toBool()) {
-        // Directories and library-root nodes: queue or play their whole contents.
-        connect(menu.addAction(tr("Play now")), &QAction::triggered, this, [this, path] {
-            playNow(tracksForPath(path));
+    if (isLeafNode(index)) {
+        // A single leaf — resolve it now (cheap) so the menu can label and reveal it.
+        const QList<Track> leaf = tracksForKeys(keys());
+        if (!leaf.isEmpty()) {
+            const Track track = leaf.first();
+            connect(menu.addAction(tr("Show info")), &QAction::triggered, this,
+                    [this, track] { showTrackDetails(track); });
+            connect(menu.addAction(track.isRemote() ? tr("Open in browser")
+                                                    : tr("Open directory")),
+                    &QAction::triggered, this,
+                    [this, track] { openTrackLocation(track); });
+        }
+    } else {
+        // Group nodes (folders, library-roots, artist/album/host): play or queue all.
+        connect(menu.addAction(tr("Play now")), &QAction::triggered, this, [this, keys] {
+            playNow(tracksForKeys(keys()));
         });
-        connect(menu.addAction(tr("Add to queue")), &QAction::triggered, this, [this, path] {
-            const QList<Track> tracks = tracksForPath(path);
+        connect(menu.addAction(tr("Add to queue")), &QAction::triggered, this, [this, keys] {
+            const QList<Track> tracks = tracksForKeys(keys());
             if (!tracks.isEmpty())
                 m_controller->enqueue(tracks);
         });
-        addToPlaylistMenu(&menu, [this, path] { return audioPathsForPath(path); });
-    } else {
-        // Files: show metadata, or add to a playlist.
-        connect(menu.addAction(tr("Show info")), &QAction::triggered, this, [this, path] {
-            const QList<Track> tracks = tracksForPath(path);
-            if (!tracks.isEmpty())
-                showTrackDetails(tracks.first());
-        });
-        addToPlaylistMenu(&menu, [this, path] { return audioPathsForPath(path); });
+
+        // Reveal the group. Local folder nodes carry their directory in PathRole and
+        // open directly; remote group nodes (Remote/host/playlist) open the first
+        // contained track's page URL in the browser.
+        const QString dir = index.data(PathRole).toString();
+        if (!dir.isEmpty()) {
+            connect(menu.addAction(tr("Open directory")), &QAction::triggered, this,
+                    [dir] { QDesktopServices::openUrl(QUrl::fromLocalFile(dir)); });
+        } else if (index.data(IsGroupRole).toBool()) {
+            connect(menu.addAction(tr("Open in browser")), &QAction::triggered, this,
+                    [this, keys] {
+                        const QList<Track> tracks = tracksForKeys(keys());
+                        if (!tracks.isEmpty())
+                            openTrackLocation(tracks.first());
+                    });
+        }
     }
-    menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    addToPlaylistMenu(&menu, keys);
+    menu.exec(tree->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::onQueueContextMenu(const QPoint &pos)
@@ -1104,73 +1309,70 @@ void MainWindow::onQueueContextMenu(const QPoint &pos)
     QMenu menu(this);
     connect(menu.addAction(tr("Show info")), &QAction::triggered, this,
             [this, track] { showTrackDetails(track); });
+    connect(menu.addAction(track.isRemote() ? tr("Open in browser")
+                                            : tr("Open directory")),
+            &QAction::triggered, this, [this, track] { openTrackLocation(track); });
     addToPlaylistMenu(&menu, [track] {
-        return QStringList{track.url.toLocalFile()};
+        return QStringList{storedForm(track.url)};
     });
     menu.exec(m_table->viewport()->mapToGlobal(pos));
 }
 
+void MainWindow::openTrackLocation(const Track &track)
+{
+    if (track.isRemote()) {
+        QDesktopServices::openUrl(track.url);   // page URL in the default browser
+        return;
+    }
+    // Local: hand the file manager the containing folder. (Reveal-and-select is
+    // platform-specific; opening the directory is the portable common denominator.)
+    const QString dir = QFileInfo(track.url.toLocalFile()).absolutePath();
+    if (!dir.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
 void MainWindow::showTrackDetails(const Track &track)
 {
+    // Collect the present fields, then render them as one aligned monospace block
+    // — robust to long paths/URLs (scrolls instead of clipping) and selectable.
+    QList<QPair<QString, QString>> rows;
+    auto add = [&](const QString &label, const QString &value) {
+        if (!value.isEmpty())
+            rows.append({label, value});
+    };
+    add(tr("Title"), track.title);
+    add(tr("Artist"), track.artist);
+    add(tr("Album"), track.album);
+    if (track.year > 0)    add(tr("Year"), QString::number(track.year));
+    if (track.trackNo > 0) add(tr("Track"), QString::number(track.trackNo));
+    if (track.durationMs > 0) add(tr("Duration"), formatTime(track.durationMs));
+    add(track.isRemote() ? tr("URL") : tr("File"), storedForm(track.url));
+    if (!track.artUrl.isEmpty())
+        add(tr("Artwork"), QUrl(track.artUrl).toLocalFile());
+
+    int width = 0;
+    for (const auto &r : rows)
+        width = qMax(width, r.first.size());
+    QString text;
+    for (const auto &r : rows)
+        text += QStringLiteral("%1  %2\n").arg(r.first + ':', -(width + 1)).arg(r.second);
+
     QDialog dlg(this);
     dlg.setWindowTitle(tr("Track info"));
-    auto *form = new QFormLayout(&dlg);
+    auto *v = new QVBoxLayout(&dlg);
 
-    auto addRow = [&](const QString &label, const QString &value) {
-        if (value.isEmpty())
-            return;
-        auto *field = new QLabel(value);
-        field->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        field->setWordWrap(true);
-        form->addRow(label, field);
-    };
-
-    addRow(tr("Title:"), track.title);
-    addRow(tr("Artist:"), track.artist);
-    addRow(tr("Album:"), track.album);
-    if (track.year > 0)
-        addRow(tr("Year:"), QString::number(track.year));
-    if (track.trackNo > 0)
-        addRow(tr("Track:"), QString::number(track.trackNo));
-    if (track.durationMs > 0)
-        addRow(tr("Duration:"), formatTime(track.durationMs));
-    addRow(tr("File:"), track.url.toLocalFile());
-    if (!track.artUrl.isEmpty())
-        addRow(tr("Artwork:"), QUrl(track.artUrl).toLocalFile());
+    auto *view = new QPlainTextEdit(text.trimmed());
+    view->setReadOnly(true);
+    view->setLineWrapMode(QPlainTextEdit::NoWrap);   // long paths scroll, never clip
+    view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    v->addWidget(view);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
     connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    form->addRow(buttons);
+    v->addWidget(buttons);
 
-    dlg.adjustSize();   // size to contents, then widen/heighten for breathing room
-    dlg.resize(dlg.width() * 2, dlg.height() + 80);
+    dlg.resize(560, 320);
     dlg.exec();
-}
-
-QList<Track> MainWindow::tracksForPath(const QString &path) const
-{
-    if (path.isEmpty())
-        return {};
-
-    auto minimalTrack = [](const QString &p) {
-        Track t;   // not in the library — minimal entry from the path
-        t.url = QUrl::fromLocalFile(p);
-        t.title = QFileInfo(p).fileName();
-        return t;
-    };
-
-    QFileInfo info(path);
-    if (!info.isDir()) {
-        // Single file: one linear lookup, no full-library hash to build.
-        for (const Track &t : m_fullLibrary)
-            if (t.url.toLocalFile() == path)
-                return {t};
-        return {minimalTrack(path)};
-    }
-
-    // Folder: gather audio files beneath it, in name order, and resolve metadata.
-    return tracksForPaths(audioPathsForPath(path));
 }
 
 QStringList MainWindow::audioPathsForPath(const QString &path) const
@@ -1192,26 +1394,26 @@ QStringList MainWindow::audioPathsForPath(const QString &path) const
     return files;
 }
 
-QList<Track> MainWindow::tracksForPaths(const QStringList &paths) const
+QList<Track> MainWindow::tracksForKeys(const QStringList &keys) const
 {
-    // Resolve each path to its library Track (full metadata), falling back to a
-    // minimal entry for files not in the library. One hash, reused across paths.
-    QHash<QString, const Track *> byPath;
-    byPath.reserve(m_fullLibrary.size());
-    for (const Track &t : m_fullLibrary)
-        byPath.insert(t.url.toLocalFile(), &t);
-
+    // Resolve each stored line (local path or URL) to its library Track (full
+    // metadata), falling back to a minimal entry for tracks not in the library.
+    // Uses the cached key->index map (rebuilt on libraryLoaded) so a 45k-row hash
+    // isn't rebuilt on every playlist load / tree enqueue.
     QList<Track> out;
-    out.reserve(paths.size());
-    for (const QString &p : paths) {
-        if (p.isEmpty())
+    out.reserve(keys.size());
+    for (const QString &line : keys) {
+        if (line.isEmpty())
             continue;
-        if (const Track *t = byPath.value(p, nullptr)) {
-            out.append(*t);
+        const QUrl url = urlFromStored(line);
+        const int idx = m_libIndexByKey.value(url.toString(QUrl::FullyEncoded), -1);
+        if (idx >= 0) {
+            out.append(m_fullLibrary.at(idx));
         } else {
             Track minimal;
-            minimal.url = QUrl::fromLocalFile(p);
-            minimal.title = QFileInfo(p).fileName();
+            minimal.url = url;
+            minimal.title = url.isLocalFile() ? QFileInfo(url.toLocalFile()).fileName()
+                                              : url.toString();
             out.append(minimal);
         }
     }
@@ -1234,13 +1436,13 @@ void MainWindow::updateQueueTitle()
         formatDurationLong(total)));
 }
 
-QStringList MainWindow::queuePaths() const
+QStringList MainWindow::queueStoredPaths() const
 {
     QStringList paths;
     const QList<Track> &q = m_controller->queue();
     paths.reserve(q.size());
     for (const Track &t : q)
-        paths << t.url.toLocalFile();
+        paths << storedForm(t.url);   // local path for local tracks, URL for remote
     return paths;
 }
 
@@ -1258,19 +1460,20 @@ void MainWindow::refreshPlaylists()
 {
     if (!m_playlistList)
         return;
-    // One path->duration hash, reused across all playlists (durations are only
-    // known for library tracks; others contribute to the count but 0 duration).
-    QHash<QString, qint64> durByPath;
-    durByPath.reserve(m_fullLibrary.size());
-    for (const Track &t : m_fullLibrary)
-        durByPath.insert(t.url.toLocalFile(), t.durationMs);
-
+    // Durations live in the library; resolve each playlist entry through the
+    // existing key->index map (kept current on libraryLoaded) rather than build a
+    // second full-library hash every refresh. Entries not in the library still
+    // count toward the track total but contribute 0 duration.
     m_playlistList->clear();
     for (const QString &name : m_store.names()) {
         const QStringList paths = m_store.readPaths(name);
         qint64 total = 0;
-        for (const QString &p : paths)
-            total += durByPath.value(p, 0);
+        for (const QString &p : paths) {
+            const int idx = m_libIndexByKey.value(
+                urlFromStored(p).toString(QUrl::FullyEncoded), -1);
+            if (idx >= 0)
+                total += m_fullLibrary.at(idx).durationMs;
+        }
         auto *item = new QListWidgetItem(name);   // delegate draws name + meta
         item->setData(Qt::UserRole, name);   // the bare name, for load/rename/delete
         item->setData(PlaylistMetaRole,
@@ -1281,7 +1484,7 @@ void MainWindow::refreshPlaylists()
 
 void MainWindow::loadPlaylist(const QString &name)
 {
-    const QList<Track> tracks = tracksForPaths(m_store.readPaths(name));
+    const QList<Track> tracks = tracksForKeys(m_store.readPaths(name));
     if (tracks.isEmpty())
         return;
     m_loadingPlaylist = true;
@@ -1322,7 +1525,7 @@ void MainWindow::buildQueueMenu()
     QAction *save = m_queueMenu->addAction(tr("Save"));
     save->setEnabled(hasQueue && m_queueDirty && !m_currentPlaylist.isEmpty());
     connect(save, &QAction::triggered, this, [this] {
-        if (m_store.write(m_currentPlaylist, queuePaths())) {
+        if (m_store.write(m_currentPlaylist, queueStoredPaths())) {
             setCurrentPlaylist(m_currentPlaylist, /*dirty=*/false);
             refreshPlaylists();
         }
@@ -1342,7 +1545,7 @@ void MainWindow::buildQueueMenu()
                    tr("Playlist \"%1\" already exists. Overwrite it?").arg(name))
                    != QMessageBox::Yes)
             return;
-        if (m_store.write(name, queuePaths())) {
+        if (m_store.write(name, queueStoredPaths())) {
             setCurrentPlaylist(name, /*dirty=*/false);
             refreshPlaylists();
         }
@@ -1352,7 +1555,7 @@ void MainWindow::buildQueueMenu()
     append->setEnabled(hasQueue && !playlists.isEmpty());
     for (const QString &name : playlists)
         connect(append->addAction(name), &QAction::triggered, this,
-                [this, name] { m_store.append(name, queuePaths()); });
+                [this, name] { m_store.append(name, queueStoredPaths()); });
 }
 
 void MainWindow::addToPlaylistMenu(QMenu *menu, std::function<QStringList()> paths)
@@ -1421,6 +1624,41 @@ void MainWindow::onPlaylistContextMenu(const QPoint &pos)
     menu.exec(m_playlistList->viewport()->mapToGlobal(pos));
 }
 
+void MainWindow::createPlaylist()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, tr("New playlist"), tr("Playlist name:"),
+        QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+    if (m_store.exists(name)) {
+        QMessageBox::information(this, tr("Playlist exists"),
+            tr("A playlist named \"%1\" already exists.").arg(name));
+        return;
+    }
+    m_store.write(name, {});   // empty playlist; populate via "Add to playlist"
+    refreshPlaylists();
+}
+
+void MainWindow::importFromUrl()
+{
+    if (m_importer->busy()) {
+        ToastArea::post(tr("An import is already running."));
+        return;
+    }
+    QSettings s;
+    ImportDialog dlg(m_store.names(),
+                     s.value("import/createPlaylist", false).toBool(),
+                     s.value("import/appendTo").toString(), this);
+    if (dlg.exec() != QDialog::Accepted || dlg.url().isEmpty())
+        return;
+
+    s.setValue("import/createPlaylist", dlg.createPlaylist());
+    s.setValue("import/appendTo", dlg.appendPlaylist());
+    m_importer->start(dlg.url(), dlg.createPlaylist(), dlg.appendPlaylist());
+}
+
 void MainWindow::onQueueChanged(const QList<Track> &queue)
 {
     // A user-driven queue change diverges it from the saved playlist; a deliberate
@@ -1430,7 +1668,7 @@ void MainWindow::onQueueChanged(const QList<Track> &queue)
         QSettings().setValue("ui/queueDirty", m_queueDirty);
     }
     updateQueueTitle();
-    m_store.saveQueueCache(queuePaths());   // keep the resumable cache current
+    m_store.saveQueueCache(queueStoredPaths());   // keep the resumable cache current
 
     if (m_searching)
         return;   // search browse mode owns the table; restored when search clears
@@ -1457,24 +1695,24 @@ void MainWindow::onCurrentTrackChanged(const Track &track)
     if (changed)
         m_lastElapsedSec = -1;   // force the elapsed label to refresh for the new track
     highlightPlaying(track.url, /*scroll=*/changed);
-    // Lazily resolve cover art for the now-playing track (worker thread).
-    if (changed)
+    // Lazily resolve cover art for the now-playing track (worker thread). Remote
+    // tracks already carry a cached cover from import, so only locals need this.
+    if (changed && !track.isRemote())
         emit requestArt(track.url.toLocalFile());
 }
 
 void MainWindow::onArtResolved(const QString &path, const QString &artUrl)
 {
     // Update the view row (if visible) and the playing queue track / MPRIS.
-    const int row = playRowForPath(path);
+    // `path` is a local file path (art is local-only); map it to the model key.
+    const int row = playRowForKey(QUrl::fromLocalFile(path));
     if (row >= 0)
         m_model->setArtUrl(row, artUrl);
     m_controller->setCurrentArt(QUrl::fromLocalFile(path), artUrl);
     if (m_controller->currentTrack().url.toLocalFile() == path)
         loadCover(artUrl);   // refresh the info-panel cover
-#ifdef HAVE_MPRIS
-    if (m_mpris && m_controller->currentTrack().url.toLocalFile() == path)
-        m_mpris->refreshMetadata();
-#endif
+    if (m_session && m_controller->currentTrack().url.toLocalFile() == path)
+        m_session->refreshMetadata();
 }
 
 void MainWindow::onPlaybackStateChanged(bool playing)

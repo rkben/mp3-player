@@ -6,6 +6,7 @@
 #include <QUrl>
 
 class QAudioOutput;
+class QMediaDevices;
 
 // Owns the QMediaPlayer + QAudioOutput and nothing else. Designed to live on a
 // dedicated worker thread so the potentially-blocking source open (FFmpeg's
@@ -28,7 +29,10 @@ public slots:
     void pause();
     void stop();
     void setPosition(qint64 ms);
-    void setVolume(float linear);   // 0.0 .. 1.0
+    void setVolume(float level);    // 0.0 .. 1.0 perceptual (converted to linear gain)
+    // Route output to the QAudioDevice with this id (QAudioDevice::id()); an empty
+    // id, or one that no longer exists, means the current system default.
+    void setAudioDevice(const QByteArray &id);
 
 signals:
     void positionChanged(qint64 ms);
@@ -41,5 +45,9 @@ signals:
 private:
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_audio = nullptr;
-    float m_pendingVolume = 0.8f;   // applied once the audio output exists
+    QMediaDevices *m_devices = nullptr;   // watches for OS device add/remove/default change
+    float m_pendingVolume = 0.8f;   // perceptual level; applied once the output exists
+    QByteArray m_pendingDeviceId;   // output device id; applied once the output exists
+
+    void applyOutputDevice();   // (re)point the sink at the configured/default device
 };

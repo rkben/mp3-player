@@ -27,7 +27,8 @@ class QMenu;
 class CoverLabel;
 class PlayerController;
 class MusicLibrary;
-class MprisController;
+class MediaSession;
+class Importer;
 
 // Two-panel desktop layout: a horizontal splitter with a tabbed left panel
 // (directory tree) and a tabbed right/primary panel (Tracks table), above a
@@ -49,6 +50,7 @@ signals:
     void requestSearch(const QString &text, int scope);
     void enrichTrack(const QString &path, const QString &title, const QString &artist,
                      const QString &album, int trackNo, qint64 durationMs);
+    void importTracks(const QList<Track> &tracks);   // -> library worker
 
 private slots:
     void openSettings();
@@ -58,6 +60,8 @@ private slots:
     void onTreeContextMenu(const QPoint &pos);
     void onQueueContextMenu(const QPoint &pos);
     void onPlaylistContextMenu(const QPoint &pos);
+    void createPlaylist();     // Playlists tab: make a new empty playlist
+    void importFromUrl();      // Playlists tab: yt-dlp import modal
     void onCurrentTrackChanged(const Track &track);
     void onQueueChanged(const QList<Track> &queue);
     void onPlaybackStateChanged(bool playing);
@@ -67,7 +71,8 @@ private slots:
     void onTracksAppended(const QList<Track> &tracks);
     void onArtResolved(const QString &path, const QString &artUrl);
     void onSearchResults(const QString &query, const QList<Track> &tracks);
-    void onScanProgress(int done, int total);
+    void onScanProgress(int done, int total, const QString &sourceLabel,
+                        const QString &fileName);
     void onScanStatus(const QString &message);
 
 private:
@@ -75,15 +80,17 @@ private:
     QWidget *buildTransportBar();
     QWidget *buildQueuePanel();       // right: "Queue" label + search + queue table
     QWidget *buildTrackInfoPanel();   // bottom-left: album art + track metadata
-    QList<Track> tracksForPath(const QString &path) const;   // file or folder -> tracks
-    QList<Track> tracksForPaths(const QStringList &paths) const;  // resolve via library
+    QList<Track> tracksForKeys(const QStringList &keys) const;    // resolve via library
     QStringList audioPathsForPath(const QString &path) const;    // file or folder -> paths
     void playNow(const QList<Track> &tracks);   // replace queue, drop any active playlist
     void showTrackDetails(const Track &track);   // modal with full metadata + path
+    // Reveal a track in the OS: local -> open its containing folder; remote -> open
+    // the page URL in the default browser.
+    void openTrackLocation(const Track &track);
     void scheduleSearch();   // debounce, or restore library when cleared
     void showTrackInfo(const Track &track);   // populate the info panel
     void updateQueueTitle();                  // "<playlist>[ [modified]] (N)" header
-    QStringList queuePaths() const;           // local file paths of the current queue
+    QStringList queueStoredPaths() const;     // playlist-file form of the current queue
     void buildQueueMenu();                    // (re)populate the queue-actions dropdown
     // "Add to playlist" submenu; paths resolved lazily on click (cheap popup).
     void addToPlaylistMenu(QMenu *menu, std::function<QStringList()> paths);
@@ -100,10 +107,15 @@ private:
     void updateVolumeIcon();                      // pick level/mute icon for the volume
     void refreshThemedIcons();                    // re-tint custom SVG icons to the theme
     QIcon themedIcon(const QString &resource) const;   // SVG tinted to the text colour
-    void rebuildTree();                       // top-level label nodes from m_folders
+    void rebuildTree();                       // Files tab: Remote node + folder roots
     void populateNode(QStandardItem *item);   // lazily fill a dir node's children
+    void appendRemoteNode();                  // Library tree: "Remote" host/playlist tree
+    void refreshRemoteNode();                 // replace just the Remote root
+    // Stored keys (paths or URLs) a tree node resolves to: a filesystem node walks
+    // its folder; a virtual leaf is its own key; a virtual group gathers descendants.
+    QStringList keysForIndex(const QModelIndex &index) const;
     void onTreeExpanded(const QModelIndex &index);
-    int playRowForPath(const QString &path) const;   // -1 if not in queue view
+    int playRowForKey(const QUrl &url) const;   // queue-view row for a track; -1 if absent
     // Select the playing row if visible. Scrolls to reveal it only when `scroll`
     // is set — kept false for art/metadata refreshes so it doesn't fight the user.
     void highlightPlaying(const QUrl &url, bool scroll);
@@ -115,9 +127,8 @@ private:
     PlayerController *m_controller;
     MusicLibrary *m_library = nullptr;
     QThread *m_libThread = nullptr;
-#ifdef HAVE_MPRIS
-    MprisController *m_mpris = nullptr;
-#endif
+    Importer *m_importer = nullptr;
+    MediaSession *m_session = nullptr;   // OS media-session bridge (null if none)
 
     QSplitter *m_splitter;
     QSplitter *m_leftPanel;          // vertical: folder tabs over track info
@@ -132,7 +143,7 @@ private:
     QLabel *m_infoAlbum;
     QTableView *m_table;
     QSortFilterProxyModel *m_proxy;
-    QTreeView *m_tree;
+    QTreeView *m_tree;                // Library tab (filesystem + Remote)
     QStandardItemModel *m_treeModel;
     QLineEdit *m_searchEdit;
     QComboBox *m_scope;
@@ -156,6 +167,7 @@ private:
     int m_repeatState = 0;   // 0 None, 1 All, 2 One
     bool m_compact = false;  // true = narrow/mobile single-panel layout
     QList<Track> m_fullLibrary;   // cached so search results can be cleared back
+    QHash<QString, int> m_libIndexByKey;   // Track::key() -> m_fullLibrary index
     bool m_searching = false;
 
     PlaylistStore m_store;        // m3u8 playlists + resumable queue cache
@@ -165,5 +177,5 @@ private:
     bool m_resumeQueue = true;    // ui/restoreQueue: repopulate the queue on launch
     bool m_autoPlay = false;      // ui/autoPlay: start playback on launch
     bool m_autoPlayPending = false;   // one-shot: consumed on the first libraryLoaded
-    QStringList m_pendingResume;  // cached-queue paths, resolved on first libraryLoaded
+    QStringList m_pendingResume;  // cached-queue lines, resolved on first libraryLoaded
 };

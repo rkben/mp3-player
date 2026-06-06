@@ -118,7 +118,7 @@ void MprisPlayerAdaptor::OpenUri(const QString &) { /* not supported */ }
 
 MprisController::MprisController(PlayerController *player, QWidget *window,
                                  QObject *parent)
-    : QObject(parent), m_player(player), m_window(window)
+    : MediaSession(parent), m_player(player), m_window(window)
 {
     new MprisRootAdaptor(this);
     m_playerAdaptor = new MprisPlayerAdaptor(this);
@@ -172,9 +172,12 @@ QVariantMap MprisController::metadata() const
         return m;
     }
     const Track t = m_player->currentTrack();
+    // A detached track (queue cleared) has index -1; '-' is illegal in a D-Bus
+    // object path, so clamp to 0 — only one track plays at a time, so uniqueness
+    // across the (empty) tracklist isn't at stake.
     m["mpris:trackid"] = QVariant::fromValue(
         QDBusObjectPath(QStringLiteral("/org/pocketplayer/track/%1")
-                            .arg(m_player->currentIndex())));
+                            .arg(qMax(0, m_player->currentIndex()))));
     const qint64 lengthUs = m_player->duration() * 1000;
     if (lengthUs > 0)
         m["mpris:length"] = lengthUs;

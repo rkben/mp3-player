@@ -1,5 +1,7 @@
 #pragma once
 
+#include "MediaSession.h"
+
 #include <QObject>
 #include <QDBusAbstractAdaptor>
 #include <QDBusObjectPath>
@@ -104,7 +106,7 @@ private:
 // Bridges PlayerController to the MPRIS D-Bus interfaces. Owns the adaptors,
 // registers the service, and pushes PropertiesChanged on state change. Reads the
 // playing track from the player's queue (not the view model).
-class MprisController : public QObject
+class MprisController : public MediaSession
 {
     Q_OBJECT
 public:
@@ -119,7 +121,7 @@ public:
     QString playbackStatus() const;
     bool canGoNext() const;
     void emitSeeked(qlonglong us);
-    void refreshMetadata();   // re-push Metadata (e.g. once art resolves)
+    void refreshMetadata() override;   // re-push Metadata (e.g. once art resolves)
 
 private slots:
     void onPlaybackStateChanged();

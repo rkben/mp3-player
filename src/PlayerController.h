@@ -9,6 +9,7 @@
 #include "PlaylistModel.h"   // Track
 
 class MediaEngine;
+class RemoteResolver;
 class QThread;
 
 // Owns an independent **play queue** — a snapshot of Tracks captured when
@@ -31,9 +32,12 @@ public:
     explicit PlayerController(QObject *parent = nullptr);
     ~PlayerController() override;
 
-    bool hasTrack() const { return m_index >= 0 && m_index < m_queue.size(); }
-    Track currentTrack() const { return hasTrack() ? m_queue.at(m_index) : Track{}; }
-    int currentIndex() const { return m_index; }     // queue index (e.g. MPRIS id)
+    // The current track is tracked independently of the queue: it may be playing
+    // while detached (m_index == -1) after the queue was cleared. m_current is the
+    // source of truth for "what's playing"; m_index only locates it in the queue.
+    bool hasTrack() const { return !m_current.url.isEmpty(); }
+    Track currentTrack() const { return m_current; }
+    int currentIndex() const { return m_index; }     // queue index, or -1 if detached
     int queueSize() const { return m_queue.size(); }
     const QList<Track> &queue() const { return m_queue; }
     bool isPlaying() const { return m_playbackState == QMediaPlayer::PlayingState; }
@@ -67,6 +71,8 @@ public slots:
     void previous();
     void setPosition(qint64 ms);
     void setVolume(float linear);          // 0.0 .. 1.0
+    // Route audio to a specific output device (QAudioDevice::id()); empty = default.
+    void setAudioDevice(const QByteArray &id);
     void setRepeatMode(RepeatMode mode);
     void setShuffle(bool on);
     // Update the current track's cover art (resolved asynchronously elsewhere).
@@ -93,6 +99,7 @@ signals:
     void engineStop();
     void engineSetPosition(qint64 ms);
     void engineSetVolume(float linear);
+    void engineSetAudioDevice(const QByteArray &id);
 
 private slots:
     void onMediaStatusChanged(QMediaPlayer::MediaStatus status);
@@ -108,18 +115,20 @@ private:
 
     QThread *m_engineThread;
     MediaEngine *m_engine;
+    RemoteResolver *m_resolver;   // resolves remote page URLs to stream URLs on play
     QMediaPlayer::PlaybackState m_playbackState = QMediaPlayer::StoppedState;
     qint64 m_position = 0;    // cached from the engine for synchronous getters
     qint64 m_duration = 0;
     float m_volume = 0.8f;
     QList<Track> m_queue;
     QList<Track> m_readyQueue;     // silent cold-start fallback (e.g. media keys)
-    int m_index = -1;              // index into m_queue
+    Track m_current;               // the playing track; survives a queue clear
+    int m_index = -1;              // m_current's index into m_queue, or -1 if detached
     QList<int> m_history;          // recently played queue indices (back/forward)
     int m_historyPos = -1;
     RepeatMode m_repeat = RepeatMode::None;
     bool m_shuffle = false;
     int m_consecutiveErrors = 0;   // guards against an all-bad queue looping
-    int m_lastErrorIndex = -1;     // dedupe: error + InvalidMedia fire together
-    int m_metaResolvedIndex = -1;  // dedupe: metaDataChanged fires repeatedly
+    QUrl m_lastErrorUrl;           // dedupe: error + InvalidMedia fire together (by track)
+    QUrl m_metaResolvedUrl;        // dedupe: metaDataChanged fires repeatedly (by track)
 };

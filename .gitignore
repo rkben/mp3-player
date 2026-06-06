@@ -1,4 +1,7 @@
 /build/
+/build-mac/
+/build-mac-uni/
+/.deps/             # from-source deps (static TagLib, etc.) — see scripts/
 *.user
 .cache/
 compile_commands.json
@@ -9,3 +12,5 @@ testdata/
 dates.tsv
 tests/year_cases.tsv
 notes/fixins.md
+.DS_Store
+aqtinstall.log

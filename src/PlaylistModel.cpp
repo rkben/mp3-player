@@ -44,7 +44,7 @@ QVariant PlaylistModel::data(const QModelIndex &index, int role) const
             return int(Qt::AlignRight | Qt::AlignVCenter);
         return {};
     case Qt::ToolTipRole:
-        return t.url.toLocalFile();
+        return t.isRemote() ? t.url.toString() : t.url.toLocalFile();
     default:
         return {};
     }
@@ -67,10 +67,10 @@ QVariant PlaylistModel::headerData(int section, Qt::Orientation orientation, int
 
 void PlaylistModel::rebuildIndex()
 {
-    m_indexByPath.clear();
-    m_indexByPath.reserve(m_tracks.size());
+    m_indexByKey.clear();
+    m_indexByKey.reserve(m_tracks.size());
     for (int i = 0; i < m_tracks.size(); ++i)
-        m_indexByPath.insert(m_tracks.at(i).url.toLocalFile(), i);
+        m_indexByKey.insert(m_tracks.at(i).key(), i);
 }
 
 void PlaylistModel::setTracks(QList<Track> tracks)
@@ -98,33 +98,10 @@ void PlaylistModel::updateTrack(int row, const QString &title, const QString &ar
                          {Qt::DisplayRole, Qt::ToolTipRole});
 }
 
-void PlaylistModel::appendTracks(const QList<Track> &tracks)
-{
-    if (tracks.isEmpty())
-        return;
-    const int first = m_tracks.size();
-    beginInsertRows({}, first, first + tracks.size() - 1);
-    m_tracks.append(tracks);
-    for (int i = first; i < m_tracks.size(); ++i)
-        m_indexByPath.insert(m_tracks.at(i).url.toLocalFile(), i);
-    endInsertRows();
-}
-
 void PlaylistModel::clear()
 {
     beginResetModel();
     m_tracks.clear();
-    m_indexByPath.clear();
+    m_indexByKey.clear();
     endResetModel();
-}
-
-void PlaylistModel::setTitle(int row, const QString &title)
-{
-    if (row < 0 || row >= m_tracks.size() || title.isEmpty())
-        return;
-    if (m_tracks[row].title == title)
-        return;
-    m_tracks[row].title = title;
-    const QModelIndex idx = index(row, Title);
-    emit dataChanged(idx, idx, {Qt::DisplayRole});
 }

@@ -5,21 +5,24 @@ Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates like 130 USD i
 
 A lightweight, mobile-styled music player built with **Qt 6 Widgets** and
 **Qt Multimedia**. Targets the desktop but uses a phone-shaped, touch-friendly
-UI. Deliberately avoids heavy dependencies (no WebEngine, no QML/Qt Quick scene
-graph) to keep CPU and power usage low.
+UI, with no WebEngine or QML/Qt Quick dependency.
 
 ## Features
 
-- Open a folder and recursively load audio (`.mp3 .flac .ogg .m4a .wav`)
+- Open folders and recursively load audio (`.mp3 .flac .ogg .m4a .wav`)
 - Play / pause / next / previous, seek, volume
 - Shuffle and repeat (off / all / one)
 - Tag metadata via TagLib, cached in SQLite (path+mtime); parallel cold scan
+- m3u8 playlists — create, import, save, append
+- Remote streaming: import tracks/playlists from any `yt-dlp`-supported URL;
+  the stream is resolved on demand at play time
 - MPRIS D-Bus control on Linux — media keys, desktop now-playing, `playerctl`
 
 ## Build
 
-Requires Qt 6 (Core, Gui, Widgets, Multimedia, Sql, Concurrent, DBus, SVG),
-TagLib, FFmpeg (the Qt Multimedia backend), and a C++17 compiler.
+Requires Qt 6 (Core, Gui, Widgets, Multimedia, Sql, Concurrent, Network, SVG,
+and DBus on Linux), TagLib, FFmpeg (the Qt Multimedia backend), and a C++17
+compiler. `yt-dlp` is an optional runtime dependency for remote streaming.
 
 ### Arch Linux
 
@@ -27,7 +30,8 @@ TagLib, FFmpeg (the Qt Multimedia backend), and a C++17 compiler.
 sudo pacman -S --needed base-devel cmake qt6-base qt6-multimedia qt6-svg taglib ffmpeg
 ```
 
-Optional: `plasma-integration` for native KDE theming (Breeze + color scheme).
+Optional: `yt-dlp` for remote streaming/import; `plasma-integration` for native
+KDE theming (Breeze + color scheme).
 
 ### Compile
 
@@ -55,3 +59,19 @@ e.g. `cmake -B build -S . -DENABLE_MPRIS=OFF`
 | `src/PlaylistModel.*` | `QAbstractListModel` of tracks driving the list view |
 | `src/MusicLibrary.*` | Threaded SQLite tag cache + parallel TagLib scan |
 | `src/MprisController.*` | MPRIS D-Bus adaptors (optional, `ENABLE_MPRIS`) |
+
+## License
+
+Released into the public domain (or under the BSD Zero Clause License) — final
+license to be decided.
+
+## Attribution
+
+Built with:
+
+- **Qt 6** — LGPLv3 — <https://www.qt.io/>
+- **TagLib** — LGPLv2.1 / MPL 1.1 — <https://taglib.org/>
+- **FFmpeg** — LGPLv2.1+ (Qt Multimedia backend) — <https://ffmpeg.org/>
+
+`album_icon.svg` by Pymouss, own work, Public Domain —
+[commons.wikimedia.org](https://commons.wikimedia.org/w/index.php?curid=5793388)

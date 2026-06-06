@@ -10,23 +10,28 @@ class QCheckBox;
 class QComboBox;
 class QPushButton;
 class QTableWidget;
+class QPlainTextEdit;
 class QWidget;
 
 // Tabbed modal settings dialog. General tab holds appearance (theme); Library
 // tab holds the labelled music folders, a manual Sync button, and an Auto Sync
-// toggle; About tab holds version/attribution. Designed so more tabs slot in.
+// toggle; Log tab shows the captured application log; About tab holds
+// version/attribution. Designed so more tabs slot in.
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
 public:
     SettingsDialog(QList<LibraryFolder> folders, bool autoSync, bool restoreQueue,
-                   bool autoPlay, Theme::Mode themeMode, QString themeFile,
+                   bool autoPlay, QString ytDlpPath, QByteArray audioDeviceId,
+                   Theme::Mode themeMode, QString themeFile,
                    QWidget *parent = nullptr);
 
     QList<LibraryFolder> folders() const;   // labels default to the dir name
     bool autoSync() const;
     bool restoreQueue() const;
     bool autoPlay() const;
+    QString ytDlpPath() const;
+    QByteArray audioDeviceId() const;   // empty == follow the system default
     Theme::Mode themeMode() const;
     QString themeFile() const;
 
@@ -44,6 +49,7 @@ private:
     void onThemeRowChanged();
     QWidget *buildGeneralTab();
     QWidget *buildLibraryTab(bool autoSync);
+    QWidget *buildLogTab();
     QWidget *buildAboutTab();
     void addFolderRow(const LibraryFolder &f);
 
@@ -55,4 +61,7 @@ private:
     QPushButton *m_themeBrowse;
     QCheckBox *m_restoreQueue;
     QCheckBox *m_autoPlay;
+    QLineEdit *m_ytDlpEdit;
+    QComboBox *m_audioCombo;
+    QPlainTextEdit *m_logView = nullptr;
 };

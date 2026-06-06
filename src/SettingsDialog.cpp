@@ -1,4 +1,5 @@
 #include "SettingsDialog.h"
+#include "Logger.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -15,10 +16,17 @@
 #include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QTextCursor>
+#include <QFontDatabase>
 #include <QDir>
+#include <QMediaDevices>
+#include <QAudioDevice>
 
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
                                bool restoreQueue, bool autoPlay,
+                               QString ytDlpPath, QByteArray audioDeviceId,
                                Theme::Mode themeMode, QString themeFile,
                                QWidget *parent)
     : QDialog(parent)
@@ -53,6 +61,28 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_autoPlay->setToolTip(tr("Start playback automatically when the app launches "
                               "(respects the shuffle setting)."));
 
+    m_ytDlpEdit = new QLineEdit(ytDlpPath);
+    m_ytDlpEdit->setPlaceholderText(tr("Path to yt-dlp"));
+    m_ytDlpEdit->setToolTip(tr("Used to import and stream remote tracks. "
+                               "Defaults to the yt-dlp found on $PATH."));
+
+    // Output device. QMediaDevices is Qt's cross-platform audio-device seam, so
+    // the same combo works on every backend. Each item carries the device id
+    // (QAudioDevice::id()) in its data; the first item is the system default
+    // (empty id) so the player follows OS device changes unless overridden.
+    m_audioCombo = new QComboBox;
+    m_audioCombo->addItem(tr("System default"), QByteArray());
+    int audioIdx = 0;
+    const auto outputs = QMediaDevices::audioOutputs();
+    for (const QAudioDevice &dev : outputs) {
+        m_audioCombo->addItem(dev.description(), dev.id());
+        if (dev.id() == audioDeviceId)
+            audioIdx = m_audioCombo->count() - 1;
+    }
+    m_audioCombo->setCurrentIndex(audioIdx);
+    m_audioCombo->setToolTip(tr("Where to send audio. \"System default\" follows "
+                                "the OS's current output device."));
+
     tabs->addTab(buildGeneralTab(), tr("General"));
 
     connect(m_themeCombo, &QComboBox::currentIndexChanged, this,
@@ -77,6 +107,7 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     for (const LibraryFolder &f : folders)
         addFolderRow(f);   // m_folderTable exists once buildLibraryTab has run
     tabs->addTab(library, tr("Library"));
+    tabs->addTab(buildLogTab(), tr("Log"));
     tabs->addTab(buildAboutTab(), tr("About"));
     tabs->setCurrentWidget(library);
 
@@ -117,6 +148,16 @@ bool SettingsDialog::autoPlay() const
     return m_autoPlay->isChecked();
 }
 
+QString SettingsDialog::ytDlpPath() const
+{
+    return m_ytDlpEdit->text().trimmed();
+}
+
+QByteArray SettingsDialog::audioDeviceId() const
+{
+    return m_audioCombo->currentData().toByteArray();
+}
+
 Theme::Mode SettingsDialog::themeMode() const
 {
     return Theme::Mode(m_themeCombo->currentData().toInt());
@@ -152,6 +193,20 @@ QWidget *SettingsDialog::buildGeneralTab()
     fileRow->addWidget(m_themeBrowse);
     themeForm->addRow(tr("Stylesheet:"), fileRow);
     layout->addWidget(themeBox);
+
+    // ---- Audio ----
+    auto *audioBox = new QGroupBox(tr("Audio"));
+    auto *audioForm = new QFormLayout(audioBox);
+    audioForm->setSpacing(8);
+    audioForm->addRow(tr("Output device:"), m_audioCombo);
+    layout->addWidget(audioBox);
+
+    // ---- Import ----
+    auto *importBox = new QGroupBox(tr("Import"));
+    auto *importForm = new QFormLayout(importBox);
+    importForm->setSpacing(8);
+    importForm->addRow(tr("yt-dlp path:"), m_ytDlpEdit);
+    layout->addWidget(importBox);
 
     layout->addStretch();
     return general;
@@ -215,6 +270,51 @@ QWidget *SettingsDialog::buildLibraryTab(bool autoSync)
     return library;
 }
 
+QWidget *SettingsDialog::buildLogTab()
+{
+    auto *tab = new QWidget;
+    auto *layout = new QVBoxLayout(tab);
+
+    m_logView = new QPlainTextEdit;
+    m_logView->setReadOnly(true);
+    m_logView->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_logView->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    m_logView->setPlainText(Logger::instance()->text());
+    layout->addWidget(m_logView, 1);
+
+    // Live-append new lines. AutoConnection makes this queued when the message
+    // arrives from a worker thread, so the widget is only touched on the GUI thread.
+    connect(Logger::instance(), &Logger::lineAppended, this,
+            [this](const QString &line) {
+                const bool atBottom =
+                    m_logView->verticalScrollBar()->value()
+                        == m_logView->verticalScrollBar()->maximum();
+                m_logView->appendPlainText(line);
+                if (atBottom)   // only auto-follow if the user hadn't scrolled up
+                    m_logView->verticalScrollBar()->setValue(
+                        m_logView->verticalScrollBar()->maximum());
+            });
+
+    auto *btnRow = new QHBoxLayout;
+    auto *copyBtn = new QPushButton(tr("Copy"));
+    copyBtn->setMinimumHeight(34);
+    connect(copyBtn, &QPushButton::clicked, this,
+            [this] { m_logView->selectAll(); m_logView->copy();
+                     m_logView->moveCursor(QTextCursor::End); });
+    auto *clearBtn = new QPushButton(tr("Clear"));
+    clearBtn->setMinimumHeight(34);
+    connect(clearBtn, &QPushButton::clicked, this,
+            [this] { Logger::instance()->clear(); m_logView->clear(); });
+    btnRow->addStretch();
+    btnRow->addWidget(copyBtn);
+    btnRow->addWidget(clearBtn);
+    layout->addLayout(btnRow);
+
+    // Start scrolled to the newest line.
+    m_logView->moveCursor(QTextCursor::End);
+    return tab;
+}
+
 QWidget *SettingsDialog::buildAboutTab()
 {
     auto *about = new QWidget;
@@ -230,23 +330,44 @@ QWidget *SettingsDialog::buildAboutTab()
 
     layout->addWidget(new QLabel(tr("A lightweight, power-conscious music player.")));
 
-    auto *attrTitle = new QLabel(tr("Attribution"));
-    QFont attrFont = attrTitle->font();
-    attrFont.setBold(true);
-    attrTitle->setFont(attrFont);
-    layout->addSpacing(6);
-    layout->addWidget(attrTitle);
+    auto *license = new QLabel(
+        tr("Released into the public domain (or under the BSD Zero Clause "
+           "License) — final license to be decided."));
+    license->setWordWrap(true);
+    layout->addWidget(license);
 
-    auto *attr = new QLabel(
-        tr("<b>album_icon.svg</b><br>"
-           "By Pymouss — Own work, Public Domain, "
-           "<a href=\"https://commons.wikimedia.org/w/index.php?curid=5793388\">"
-           "commons.wikimedia.org</a>"));
-    attr->setTextFormat(Qt::RichText);
-    attr->setWordWrap(true);
-    attr->setOpenExternalLinks(true);
-    attr->setTextInteractionFlags(Qt::TextBrowserInteraction);
-    layout->addWidget(attr);
+    auto makeHeading = [&](const QString &text) {
+        auto *h = new QLabel(text);
+        QFont f = h->font();
+        f.setBold(true);
+        h->setFont(f);
+        layout->addSpacing(6);
+        layout->addWidget(h);
+    };
+
+    auto richLabel = [&](const QString &html) {
+        auto *l = new QLabel(html);
+        l->setTextFormat(Qt::RichText);
+        l->setWordWrap(true);
+        l->setOpenExternalLinks(true);
+        l->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        layout->addWidget(l);
+    };
+
+    makeHeading(tr("Built with"));
+    richLabel(tr(
+        "<b>Qt 6</b> — LGPLv3 · "
+        "<a href=\"https://www.qt.io/\">qt.io</a><br>"
+        "<b>TagLib</b> — LGPLv2.1 / MPL 1.1 · "
+        "<a href=\"https://taglib.org/\">taglib.org</a><br>"
+        "<b>FFmpeg</b> — LGPLv2.1+ (Qt Multimedia backend) · "
+        "<a href=\"https://ffmpeg.org/\">ffmpeg.org</a>"));
+
+    makeHeading(tr("Attribution"));
+    richLabel(tr(
+        "<b>album_icon.svg</b> — by Pymouss, Own work, Public Domain · "
+        "<a href=\"https://commons.wikimedia.org/w/index.php?curid=5793388\">"
+        "commons.wikimedia.org</a>"));
 
     layout->addStretch();
     return about;

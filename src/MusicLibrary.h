@@ -54,16 +54,23 @@ public slots:
                         const QString &artist, const QString &album,
                         int trackNo, qint64 durationMs);
 
+    // Insert/replace remote (streamed) tracks. These carry a full URL identity
+    // (uri = Track::key()), no local path, a pre-resolved cover art_url, and are
+    // never touched by the folder scan/prune. Emits libraryLoaded when done.
+    void importTracks(const QList<Track> &tracks);
+
 signals:
     void libraryLoaded(const QList<Track> &tracks);   // full replace (cache + final)
     void tracksAppended(const QList<Track> &tracks);  // incremental, during cold scan
-    void scanProgress(int done, int total);
+    void scanProgress(int done, int total, const QString &sourceLabel,
+                      const QString &fileName);
     void scanStatus(const QString &message);          // empty string == idle/finished
     void artResolved(const QString &path, const QString &artUrl);
     void searchResults(const QString &query, const QList<Track> &tracks);
 
 private:
     bool ensureDb();
+    void createTracksTable();   // uri-keyed schema
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
     QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
     static void upsert(QSqlQuery &q, const Track &t, qint64 mtime);

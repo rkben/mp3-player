@@ -21,6 +21,12 @@ struct Track {
         return artist.isEmpty() ? title : artist + QStringLiteral(" — ") + title;
     }
 
+    // Stable identity for a track, local or remote: the full URL string. Local
+    // files are "file://…", remote tracks their "https://…" page URL. Used as the
+    // DB key, the model row index, and the MPRIS track id.
+    QString key() const { return url.toString(QUrl::FullyEncoded); }
+    bool isRemote() const { return !url.isLocalFile(); }
+
     // Overlay non-empty/positive fields from `other` onto this track, leaving the
     // rest intact. Returns true if anything actually changed. Shared by the model
     // and the player so the "keep existing values" rule lives in one place.
@@ -54,26 +60,24 @@ public:
                         int role = Qt::DisplayRole) const override;
 
     void setTracks(QList<Track> tracks);
-    void appendTracks(const QList<Track> &tracks);
     void clear();
     bool isEmpty() const { return m_tracks.isEmpty(); }
     int count() const { return m_tracks.size(); }
 
     const Track &at(int row) const { return m_tracks.at(row); }
-    // O(1) row lookup by local file path; -1 if not present. Kept in sync with
-    // the row list so callers don't have to linear-scan on every track change.
-    int rowForPath(const QString &localFile) const { return m_indexByPath.value(localFile, -1); }
-    void setTitle(int row, const QString &title);
+    // O(1) row lookup by track key (url string); -1 if not present. Kept in sync
+    // with the row list so callers don't have to linear-scan on every track change.
+    int rowForKey(const QString &key) const { return m_indexByKey.value(key, -1); }
     void setArtUrl(int row, const QString &artUrl);
     // Merge in player-resolved metadata; only non-empty/positive fields overwrite.
     void updateTrack(int row, const QString &title, const QString &artist,
                      const QString &album, qint64 durationMs, int trackNo);
 
 private:
-    void rebuildIndex();   // refresh m_indexByPath from m_tracks
+    void rebuildIndex();   // refresh m_indexByKey from m_tracks
 
     QList<Track> m_tracks;
-    QHash<QString, int> m_indexByPath;   // local file path -> row, for O(1) lookup
+    QHash<QString, int> m_indexByKey;   // track key (url string) -> row, O(1) lookup
 };
 
 Q_DECLARE_METATYPE(Track)

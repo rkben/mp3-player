@@ -17,9 +17,9 @@
 #include <QCoreApplication>
 
 #include <QCryptographicHash>
+#include <QRegularExpression>
 #include <QUrl>
 
-#include "YearParser.h"
 #include "AudioFormats.h"
 
 #include <taglib/fileref.h>
@@ -31,10 +31,22 @@
 namespace {
 constexpr int kCommitEvery = 1000;   // rows per transaction batch
 constexpr int kAppendBatch = 200;    // tracks per progressive UI append
-constexpr int kProgressEvery = 250;  // progress emit cadence
+constexpr int kPumpEvery = 250;      // event-pump cadence (keep coarse: cheap GUI breathing room)
+
+// Status-line progress emit cadence (files per scanProgress signal). 1 = every
+// file. Override at runtime with PP_SCAN_PROGRESS_EVERY for testing.
+int progressEvery()
+{
+    static const int n = []() {
+        bool ok = false;
+        const int v = qEnvironmentVariableIntValue("PP_SCAN_PROGRESS_EVERY", &ok);
+        return (ok && v > 0) ? v : 1;
+    }();
+    return n;
+}
 
 // A file that needs (re)parsing, plus the freshly parsed result.
-struct ScanItem { QString path; qint64 mtime; };
+struct ScanItem { QString path; qint64 mtime; QString sourceLabel; };
 struct ParsedRow { Track track; qint64 mtime; };
 }
 
@@ -77,28 +89,9 @@ bool MusicLibrary::ensureDb()
     QSqlQuery q(m_db);
     q.exec("PRAGMA journal_mode=WAL");
     q.exec("PRAGMA synchronous=NORMAL");
-    q.exec(R"(CREATE TABLE IF NOT EXISTS tracks(
-                path     TEXT PRIMARY KEY,
-                mtime    INTEGER NOT NULL,
-                artist   TEXT,
-                title    TEXT,
-                album    TEXT,
-                duration INTEGER DEFAULT 0,
-                track_no INTEGER DEFAULT 0))");
 
-    // Migrate older DBs: add art_url / year columns if missing.
-    bool hasArt = false, hasYear = false;
-    QSqlQuery info(m_db);
-    info.exec("PRAGMA table_info(tracks)");
-    while (info.next()) {
-        const QString col = info.value(1).toString();
-        if (col == "art_url") hasArt = true;
-        else if (col == "year") hasYear = true;
-    }
-    if (!hasArt)
-        q.exec("ALTER TABLE tracks ADD COLUMN art_url TEXT");
-    if (!hasYear)
-        q.exec("ALTER TABLE tracks ADD COLUMN year INTEGER DEFAULT 0");
+    // Identity is the `uri` (url string) so a track may be local or remote.
+    createTracksTable();
 
     // Full-text index over title/artist/album, external-content (no data dup),
     // kept in sync with `tracks` via triggers. Built (and back-filled) once.
@@ -119,11 +112,31 @@ bool MusicLibrary::ensureDb()
            "VALUES('delete', old.rowid, old.title, old.artist, old.album); "
            "INSERT INTO tracks_fts(rowid, title, artist, album) "
            "VALUES(new.rowid, new.title, new.artist, new.album); END");
-    if (!ftsExists)   // back-fill the index from any pre-existing rows
+    if (!ftsExists)   // back-fill from any pre-existing rows
         q.exec("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')");
 
     m_opened = true;
     return true;
+}
+
+void MusicLibrary::createTracksTable()
+{
+    // Identity is `uri` (url string). `path` is the local filesystem path for
+    // local rows and NULL for remote ones; `remote` flags which is which so the
+    // folder scan/prune and art extraction only ever touch local rows.
+    QSqlQuery q(m_db);
+    q.exec(R"(CREATE TABLE IF NOT EXISTS tracks(
+                uri      TEXT PRIMARY KEY,
+                path     TEXT,
+                remote   INTEGER NOT NULL DEFAULT 0,
+                mtime    INTEGER NOT NULL DEFAULT 0,
+                artist   TEXT,
+                title    TEXT,
+                album    TEXT,
+                duration INTEGER DEFAULT 0,
+                track_no INTEGER DEFAULT 0,
+                year     INTEGER DEFAULT 0,
+                art_url  TEXT))");
 }
 
 QList<Track> MusicLibrary::loadAll(QHash<QString, qint64> *mtimesOut)
@@ -131,25 +144,30 @@ QList<Track> MusicLibrary::loadAll(QHash<QString, qint64> *mtimesOut)
     QList<Track> tracks;
     QSqlQuery q(m_db);
     q.setForwardOnly(true);
-    q.exec("SELECT path, mtime, artist, title, album, duration, track_no, art_url, "
-           "year FROM tracks ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
+    q.exec("SELECT uri, path, remote, mtime, artist, title, album, duration, "
+           "track_no, art_url, year FROM tracks "
+           "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
            "track_no, title COLLATE NOCASE");
     while (q.next()) {
-        const QString path = q.value(0).toString();
+        const QString uri = q.value(0).toString();
+        const QString path = q.value(1).toString();
+        const bool remote = q.value(2).toInt() != 0;
         Track t;
-        t.url = QUrl::fromLocalFile(path);
-        t.artist = q.value(2).toString();
-        t.title = q.value(3).toString();
-        t.album = q.value(4).toString();
-        t.durationMs = q.value(5).toLongLong();
-        t.trackNo = q.value(6).toInt();
-        t.artUrl = q.value(7).toString();
-        t.year = q.value(8).toInt();
-        if (t.title.isEmpty())
+        t.url = QUrl(uri);
+        t.artist = q.value(4).toString();
+        t.title = q.value(5).toString();
+        t.album = q.value(6).toString();
+        t.durationMs = q.value(7).toLongLong();
+        t.trackNo = q.value(8).toInt();
+        t.artUrl = q.value(9).toString();
+        t.year = q.value(10).toInt();
+        if (t.title.isEmpty() && !remote)
             t.title = QFileInfo(path).completeBaseName();
         tracks.append(t);
-        if (mtimesOut)
-            mtimesOut->insert(path, q.value(1).toLongLong());
+        // Only local rows feed the scan's mtime reconciliation; remote rows are
+        // never walked or pruned (no filesystem path).
+        if (mtimesOut && !remote)
+            mtimesOut->insert(path, q.value(3).toLongLong());
     }
     return tracks;
 }
@@ -161,12 +179,13 @@ QSqlQuery MusicLibrary::prepareUpsert()
     // change we null art_url so re-tagged files re-extract their (possibly new)
     // cover; an unchanged mtime keeps the cached art.
     QSqlQuery q(m_db);
-    q.prepare("INSERT INTO tracks(path, mtime, artist, title, album, duration, "
-              "track_no, year) VALUES(?,?,?,?,?,?,?,?) "
-              "ON CONFLICT(path) DO UPDATE SET "
-              "mtime=excluded.mtime, artist=excluded.artist, title=excluded.title, "
-              "album=excluded.album, duration=excluded.duration, "
-              "track_no=excluded.track_no, year=excluded.year, "
+    q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
+              "duration, track_no, year) VALUES(?,?,0,?,?,?,?,?,?,?) "
+              "ON CONFLICT(uri) DO UPDATE SET "
+              "path=excluded.path, mtime=excluded.mtime, artist=excluded.artist, "
+              "title=excluded.title, album=excluded.album, "
+              "duration=excluded.duration, track_no=excluded.track_no, "
+              "year=excluded.year, "
               "art_url=CASE WHEN tracks.mtime<>excluded.mtime "
               "THEN NULL ELSE tracks.art_url END");
     return q;
@@ -174,14 +193,15 @@ QSqlQuery MusicLibrary::prepareUpsert()
 
 void MusicLibrary::upsert(QSqlQuery &q, const Track &t, qint64 mtime)
 {
-    q.bindValue(0, t.url.toLocalFile());
-    q.bindValue(1, mtime);
-    q.bindValue(2, t.artist);
-    q.bindValue(3, t.title);
-    q.bindValue(4, t.album);
-    q.bindValue(5, t.durationMs);
-    q.bindValue(6, t.trackNo);
-    q.bindValue(7, t.year);
+    q.bindValue(0, t.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
+    q.bindValue(1, t.url.toLocalFile());                  // local filesystem path
+    q.bindValue(2, mtime);
+    q.bindValue(3, t.artist);
+    q.bindValue(4, t.title);
+    q.bindValue(5, t.album);
+    q.bindValue(6, t.durationMs);
+    q.bindValue(7, t.trackNo);
+    q.bindValue(8, t.year);
     if (!q.exec())
         qWarning() << "upsert failed:" << q.lastError().text();
 }
@@ -203,16 +223,18 @@ Track MusicLibrary::parseTags(const QString &path, qint64 /*mtime*/)
         if (TagLib::AudioProperties *props = f.audioProperties())
             t.durationMs = props->lengthInMilliseconds();
 
-        // TagLib's year() is 0 for many formats/odd date strings. Fall back to
-        // normalizing the raw date properties ourselves (handles ISO, ranges…).
+        // TagLib's year() is 0 for many formats. Fall back to the first 4-digit
+        // run in the raw date properties (handles "2011-03-18", "2011/03", …).
         if (t.year == 0) {
             const TagLib::PropertyMap props = f.properties();
             for (const char *key : {"DATE", "ORIGINALDATE", "YEAR", "ORIGINALYEAR"}) {
-                if (props.contains(key) && !props[key].isEmpty()) {
-                    t.year = normalizeYear(
-                        QString::fromStdString(props[key].front().to8Bit(true)));
-                    if (t.year != 0)
-                        break;
+                if (!props.contains(key) || props[key].isEmpty())
+                    continue;
+                const QString s = QString::fromStdString(props[key].front().to8Bit(true));
+                const auto m = QRegularExpression(QStringLiteral("\\d{4}")).match(s);
+                if (m.hasMatch()) {
+                    const int y = m.captured().toInt();
+                    if (y >= 1000 && y <= 9999) { t.year = y; break; }
                 }
             }
         }
@@ -249,6 +271,38 @@ void MusicLibrary::enrichMetadata(const QString &path, const QString &title,
     q.addBindValue(path);
     if (!q.exec())
         qWarning() << "enrichMetadata failed:" << q.lastError().text();
+}
+
+void MusicLibrary::importTracks(const QList<Track> &tracks)
+{
+    if (!ensureDb() || tracks.isEmpty())
+        return;
+
+    m_db.transaction();
+    QSqlQuery q(m_db);
+    q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
+              "duration, track_no, year, art_url) VALUES(?,NULL,1,0,?,?,?,?,?,?,?) "
+              "ON CONFLICT(uri) DO UPDATE SET "
+              "artist=excluded.artist, title=excluded.title, album=excluded.album, "
+              "duration=excluded.duration, track_no=excluded.track_no, "
+              "year=excluded.year, art_url=excluded.art_url");
+    for (const Track &t : tracks) {
+        q.addBindValue(t.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
+        // Store NULL (not "") for a missing artist, e.g. a YouTube video with no
+        // artist tag, so it reads as genuinely unknown rather than blank.
+        q.addBindValue(t.artist.isEmpty() ? QVariant() : QVariant(t.artist));
+        q.addBindValue(t.title);
+        q.addBindValue(t.album);
+        q.addBindValue(t.durationMs);
+        q.addBindValue(t.trackNo);
+        q.addBindValue(t.year);
+        q.addBindValue(t.artUrl);
+        if (!q.exec())
+            qWarning() << "importTracks row failed:" << q.lastError().text();
+    }
+    m_db.commit();
+
+    emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
 }
 
 void MusicLibrary::resolveArt(const QString &path)
@@ -366,8 +420,8 @@ void MusicLibrary::search(const QString &text, int scope)
         return;
 
     // Same column list whichever path we take, so results build identically.
-    const char *kCols = "t.path, t.artist, t.title, t.album, t.duration, "
-                        "t.track_no, t.art_url, t.year";
+    const char *kCols = "t.uri, t.path, t.remote, t.artist, t.title, t.album, "
+                        "t.duration, t.track_no, t.art_url, t.year";
 
     QSqlQuery q(m_db);
     q.setForwardOnly(true);
@@ -401,17 +455,18 @@ void MusicLibrary::search(const QString &text, int scope)
     if (run) {
         if (q.exec()) {
             while (q.next()) {
-                const QString path = q.value(0).toString();
+                const QString path = q.value(1).toString();
+                const bool remote = q.value(2).toInt() != 0;
                 Track t;
-                t.url = QUrl::fromLocalFile(path);
-                t.artist = q.value(1).toString();
-                t.title = q.value(2).toString();
-                t.album = q.value(3).toString();
-                t.durationMs = q.value(4).toLongLong();
-                t.trackNo = q.value(5).toInt();
-                t.artUrl = q.value(6).toString();
-                t.year = q.value(7).toInt();
-                if (t.title.isEmpty())
+                t.url = QUrl(q.value(0).toString());
+                t.artist = q.value(3).toString();
+                t.title = q.value(4).toString();
+                t.album = q.value(5).toString();
+                t.durationMs = q.value(6).toLongLong();
+                t.trackNo = q.value(7).toInt();
+                t.artUrl = q.value(8).toString();
+                t.year = q.value(9).toInt();
+                if (t.title.isEmpty() && !remote)
                     t.title = QFileInfo(path).completeBaseName();
                 results.append(t);
             }
@@ -461,6 +516,8 @@ void MusicLibrary::scan(const QStringList &folders)
     for (const QString &folder : folders) {
         if (folder.isEmpty())
             continue;
+        // Label progress by the configured folder's name, not its full path.
+        const QString sourceLabel = QDir(folder).dirName();
         QDirIterator it(folder, audioGlobs(), QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = it.next();
@@ -470,7 +527,7 @@ void MusicLibrary::scan(const QStringList &folders)
             const qint64 mtime = QFileInfo(path).lastModified().toSecsSinceEpoch();
             const auto c = cachedMtimes.constFind(path);
             if (c == cachedMtimes.cend() || c.value() != mtime)
-                todo.append(ScanItem{path, mtime});
+                todo.append(ScanItem{path, mtime, sourceLabel});
         }
     }
     const qint64 walkMs = scanTimer.elapsed() - loadMs;
@@ -521,8 +578,15 @@ void MusicLibrary::scan(const QStringList &folders)
                 m_db.transaction();
                 sinceCommit = 0;
             }
-            if (++done % kProgressEvery == 0) {
-                emit scanProgress(done, total);
+            ++done;
+            if (done % progressEvery() == 0 || done == total) {
+                // Results arrive in input order, so todo[done-1] is the file just
+                // parsed. Report its folder label and bare filename.
+                const ScanItem &cur = todo.at(done - 1);
+                emit scanProgress(done, total, cur.sourceLabel,
+                                  QFileInfo(cur.path).fileName());
+            }
+            if (done % kPumpEvery == 0) {
                 // Let queued search/art requests on this worker run between
                 // batches instead of waiting for the whole scan to finish.
                 QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
@@ -531,7 +595,8 @@ void MusicLibrary::scan(const QStringList &folders)
         m_db.commit();
         if (cold && !batch.isEmpty())
             emit tracksAppended(batch);
-        emit scanProgress(total, total);
+        // Final 100% emit happens inside the loop above (done == total); skipped
+        // on cancel so we never report a bogus complete.
 
         if (bench) {
             fprintf(stderr, "[scan] parsed %d files in %lld ms using %d thread(s) "
@@ -547,10 +612,12 @@ void MusicLibrary::scan(const QStringList &folders)
         return;
     }
 
-    // Prune rows whose files are gone (one prepared DELETE, re-bound per row).
+    // Prune local rows whose files are gone (one prepared DELETE, re-bound per
+    // row). Scoped to remote=0 so streamed tracks are never pruned by the walk;
+    // cachedMtimes already holds only local rows, this is belt-and-braces.
     int pruned = 0;
     QSqlQuery del(m_db);
-    del.prepare("DELETE FROM tracks WHERE path=?");
+    del.prepare("DELETE FROM tracks WHERE path=? AND remote=0");
     for (auto it = cachedMtimes.cbegin(); it != cachedMtimes.cend(); ++it) {
         if (!seen.contains(it.key())) {
             del.bindValue(0, it.key());

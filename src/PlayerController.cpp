@@ -1,5 +1,6 @@
 #include "PlayerController.h"
 #include "MediaEngine.h"
+#include "RemoteResolver.h"
 
 #include <QThread>
 #include <QRandomGenerator>
@@ -8,6 +9,7 @@ PlayerController::PlayerController(QObject *parent)
     : QObject(parent)
     , m_engineThread(new QThread(this))
     , m_engine(new MediaEngine)   // no parent: moved to the worker thread
+    , m_resolver(new RemoteResolver(this))
 {
     // These cross the thread boundary via queued connections, so they must be
     // registered as metatypes (the QMediaPlayer enums and metadata value type).
@@ -27,6 +29,7 @@ PlayerController::PlayerController(QObject *parent)
     connect(this, &PlayerController::engineStop, m_engine, &MediaEngine::stop);
     connect(this, &PlayerController::engineSetPosition, m_engine, &MediaEngine::setPosition);
     connect(this, &PlayerController::engineSetVolume, m_engine, &MediaEngine::setVolume);
+    connect(this, &PlayerController::engineSetAudioDevice, m_engine, &MediaEngine::setAudioDevice);
 
     // Engine -> controller (queued: marshalled back to the GUI thread). Position
     // and duration are cached for the synchronous getters and re-emitted.
@@ -47,6 +50,19 @@ PlayerController::PlayerController(QObject *parent)
     connect(m_engine, &MediaEngine::playbackStateChanged,
             this, &PlayerController::onPlaybackStateChanged);
 
+    // Remote stream resolution. The result is only loaded if it's still the
+    // current track (the user may have skipped while yt-dlp was running).
+    connect(m_resolver, &RemoteResolver::resolved, this,
+            [this](const QUrl &pageUrl, const QUrl &streamUrl) {
+                if (hasTrack() && m_current.url == pageUrl)
+                    emit engineLoad(streamUrl, /*autoplay=*/true);
+            });
+    connect(m_resolver, &RemoteResolver::failed, this,
+            [this](const QUrl &pageUrl, const QString &message) {
+                if (hasTrack() && m_current.url == pageUrl)
+                    skipBadTrack(message);
+            });
+
     m_engineThread->start();
 }
 
@@ -61,7 +77,7 @@ void PlayerController::onPlaybackStateChanged(QMediaPlayer::PlaybackState s)
     m_playbackState = s;
     if (s == QMediaPlayer::PlayingState) {
         m_consecutiveErrors = 0;   // a track played -> chain is healthy
-        m_lastErrorIndex = -1;
+        m_lastErrorUrl = QUrl{};
     }
     emit playbackStateChanged(s == QMediaPlayer::PlayingState);
 }
@@ -69,11 +85,16 @@ void PlayerController::onPlaybackStateChanged(QMediaPlayer::PlaybackState s)
 void PlayerController::playInternal(int qindex)
 {
     m_index = qindex;
-    m_metaResolvedIndex = -1;   // a new track may re-use this slot; resolve afresh
+    m_metaResolvedUrl = QUrl{};  // a new track; resolve its metadata afresh
     m_duration = 0;             // reset cached duration until the new source reports
     m_position = 0;
-    emit engineLoad(m_queue.at(qindex).url, /*autoplay=*/true);
-    emit currentTrackChanged(m_queue.at(qindex));
+    m_current = m_queue.at(qindex);   // the source of truth for "what's playing"
+    const Track &t = m_current;
+    if (t.isRemote())
+        m_resolver->resolve(t.url);   // engineLoad fires once the stream resolves
+    else
+        emit engineLoad(t.url, /*autoplay=*/true);
+    emit currentTrackChanged(t);
 }
 
 void PlayerController::recordHistory(int qindex)
@@ -97,12 +118,13 @@ void PlayerController::playQueue(const QList<Track> &tracks, int start)
     m_history.clear();
     m_historyPos = -1;
     m_consecutiveErrors = 0;
-    m_lastErrorIndex = -1;
+    m_lastErrorUrl = QUrl{};
 
     emit queueChanged(m_queue);
 
     if (start < 0 || start >= m_queue.size()) {
         m_index = -1;
+        m_current = Track{};
         emit engineStop();
         emit currentTrackChanged(Track{});
         return;
@@ -124,29 +146,23 @@ void PlayerController::jumpTo(int index)
     if (index < 0 || index >= m_queue.size())
         return;
     m_consecutiveErrors = 0;
-    m_lastErrorIndex = -1;
+    m_lastErrorUrl = QUrl{};
     playInternal(index);
     recordHistory(index);
 }
 
 void PlayerController::clearQueue()
 {
-    if (hasTrack()) {
-        // Keep the playing track so audio (and now-playing) stay valid; drop the
-        // rest. It plays out, then pickNext finds nothing and playback stops.
-        m_queue = {m_queue.at(m_index)};
-        m_index = 0;
-        m_history = {0};
-        m_historyPos = 0;
-    } else {
-        m_queue.clear();
-        m_index = -1;
-        m_history.clear();
-        m_historyPos = -1;
-    }
+    // Empty the queue entirely. If something is playing it detaches (m_index = -1)
+    // and keeps going — m_current still drives audio, now-playing, and MPRIS — so
+    // it dangles past the now-empty queue and stops naturally at end-of-track
+    // (pickNext finds nothing). The engine is deliberately not stopped here.
+    m_queue.clear();
+    m_index = -1;
+    m_history.clear();
+    m_historyPos = -1;
     m_consecutiveErrors = 0;
-    m_lastErrorIndex = -1;
-    m_metaResolvedIndex = -1;
+    m_lastErrorUrl = QUrl{};
     emit queueChanged(m_queue);
 }
 
@@ -246,6 +262,12 @@ void PlayerController::setVolume(float linear)
     emit volumeChanged(linear);
 }
 
+void PlayerController::setAudioDevice(const QByteArray &id)
+{
+    // Forwarded to the engine on its worker thread; the QAudioOutput lives there.
+    emit engineSetAudioDevice(id);
+}
+
 void PlayerController::setRepeatMode(RepeatMode mode)
 {
     if (m_repeat == mode)
@@ -264,12 +286,14 @@ void PlayerController::setShuffle(bool on)
 
 void PlayerController::setCurrentArt(const QUrl &url, const QString &artUrl)
 {
-    if (!hasTrack() || m_queue.at(m_index).url != url)
+    if (!hasTrack() || m_current.url != url)
         return;
-    if (m_queue.at(m_index).artUrl == artUrl)
+    if (m_current.artUrl == artUrl)
         return;   // unchanged — avoid a redundant currentTrackChanged (re-request loop)
-    m_queue[m_index].artUrl = artUrl;
-    emit currentTrackChanged(m_queue.at(m_index));   // let MPRIS pick up the art
+    m_current.artUrl = artUrl;
+    if (m_index >= 0 && m_index < m_queue.size())
+        m_queue[m_index].artUrl = artUrl;   // keep the queue copy in sync (if still queued)
+    emit currentTrackChanged(m_current);    // let MPRIS pick up the art
 }
 
 int PlayerController::pickNext(bool userInitiated) const
@@ -320,13 +344,15 @@ void PlayerController::onErrorOccurred(QMediaPlayer::Error error, const QString 
 void PlayerController::skipBadTrack(const QString &message)
 {
     // errorOccurred and InvalidMedia both fire for one bad file: handle once.
-    if (!hasTrack() || m_index == m_lastErrorIndex)
+    // Dedupe by track URL (not index) so a detached track is handled correctly too.
+    if (!hasTrack() || m_current.url == m_lastErrorUrl)
         return;
-    m_lastErrorIndex = m_index;
+    m_lastErrorUrl = m_current.url;
 
-    emit trackError(m_queue.at(m_index).title, message);
+    emit trackError(m_current.title, message);
 
     // Bail out if everything is failing, so we don't spin through a dead queue.
+    // A detached track (empty queue) always stops here — there's nothing to skip to.
     if (++m_consecutiveErrors >= m_queue.size()) {
         emit engineStop();
         return;
@@ -355,18 +381,22 @@ void PlayerController::onMetaDataChanged(const QMediaMetaData &md)
     if (title.isEmpty() && artist.isEmpty() && album.isEmpty())
         return;   // nothing useful to surface
 
-    // Fill the queue copy so the now-playing display and MPRIS reflect it too.
-    // (Don't fold duration/trackNo into the queue Track — they're surfaced via
+    // Fill the now-playing track so the display and MPRIS reflect it; keep the
+    // queue copy in sync when the track is still queued (it may be detached).
+    // (Don't fold duration/trackNo into the Track — they're surfaced via
     // metadataResolved/the DB, not the now-playing labels.)
-    Track &t = m_queue[m_index];
+    Track &t = m_current;
     const bool changed = t.mergeFrom(title, artist, album, /*dur=*/0, /*tno=*/0);
-    if (changed)
+    if (changed) {
+        if (m_index >= 0 && m_index < m_queue.size())
+            m_queue[m_index] = t;
         emit currentTrackChanged(t);
+    }
 
     // metaDataChanged can fire several times per track; only persist when the
     // track changed or its tags actually moved, so we don't spam the DB writer.
-    if (!changed && m_metaResolvedIndex == m_index)
+    if (!changed && m_metaResolvedUrl == t.url)
         return;
-    m_metaResolvedIndex = m_index;
+    m_metaResolvedUrl = t.url;
     emit metadataResolved(t.url, title, artist, album, trackNo, durationMs);
 }
