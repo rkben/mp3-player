@@ -53,7 +53,8 @@ signals:
     void importTracks(const QList<Track> &tracks);   // -> library worker
 
 private slots:
-    void openSettings();
+    void openSettings(bool startOnLibrary = false);
+    void resetApplication();   // wipe DB + data + settings, then quit (clean slate)
     void onTrackActivated(const QModelIndex &index);
     void onTreeActivated(const QModelIndex &index);   // double-click: enqueue
     void onTreeClicked(const QModelIndex &index);      // single-click: expand dirs
@@ -177,6 +178,7 @@ private:
     QString m_currentPlaylist;    // empty = unsaved "Queue"; else the loaded playlist
     bool m_queueDirty = false;    // queue diverged from the saved playlist
     bool m_loadingPlaylist = false;   // guard: deliberate load shouldn't flag dirty
+    bool m_resetting = false;     // suppress save-on-quit while wiping for a reset
     bool m_resumeQueue = true;    // ui/restoreQueue: repopulate the queue on launch
     bool m_autoPlay = false;      // ui/autoPlay: start playback on launch
     bool m_autoPlayPending = false;   // one-shot: consumed on the first libraryLoaded

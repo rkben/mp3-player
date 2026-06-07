@@ -11,6 +11,7 @@ class QComboBox;
 class QPushButton;
 class QTableWidget;
 class QPlainTextEdit;
+class QTabWidget;
 class QWidget;
 
 // Tabbed modal settings dialog. General tab holds appearance (theme); Library
@@ -34,6 +35,14 @@ public:
     QByteArray audioDeviceId() const;   // empty == follow the system default
     Theme::Mode themeMode() const;
     QString themeFile() const;
+
+    // True if the user confirmed "Reset application" (clean slate). The host wipes
+    // its data/config and restarts; other getters are ignored when this is set.
+    bool resetRequested() const { return m_resetRequested; }
+
+    // Open the dialog on the Library tab (e.g. from the Library "Add Directory"
+    // button); default is the General tab.
+    void selectLibraryTab();
 
 signals:
     // Emitted when the user clicks "Sync now" (dialog stays open).
@@ -64,6 +73,9 @@ private:
     QLineEdit *m_ytDlpEdit;
     QComboBox *m_audioCombo;
     QPlainTextEdit *m_logView = nullptr;
+    QTabWidget *m_tabs = nullptr;
+    QWidget *m_libraryPage = nullptr;   // the Library tab's scroll page, for selection
+    bool m_resetRequested = false;
 #ifdef HAVE_DISCORD_RPC
     QLineEdit *m_discordAppId = nullptr;   // self-contained: persists to QSettings
 #endif

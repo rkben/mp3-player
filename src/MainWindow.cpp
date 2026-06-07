@@ -31,6 +31,7 @@
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 #include <QDir>
+#include <QStandardPaths>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QDesktopServices>
@@ -209,6 +210,8 @@ MainWindow::MainWindow(QWidget *parent)
 
 void MainWindow::flushQueueCache()
 {
+    if (m_resetting)
+        return;   // a reset is wiping AppData — don't recreate the queue cache
     // A debounced queue edit may still be pending when we quit; write it now so the
     // resume cache reflects the final queue rather than a stale snapshot.
     if (m_queueCacheTimer->isActive()) {
@@ -314,7 +317,24 @@ void MainWindow::buildUi()
 
     m_leftTabs = new QTabWidget;
     m_leftTabs->setDocumentMode(true);   // flat tab pane, no rounded frame
-    m_leftTabs->addTab(m_tree, tr("Library"));
+
+    // Library tab — an "Add Directory" button (opens Settings on the Library tab,
+    // where folders are managed) over the filesystem tree. Mirrors the Playlists tab.
+    auto *libTab = new QWidget;
+    auto *libLayout = new QVBoxLayout(libTab);
+    libLayout->setContentsMargins(0, 0, 0, 0);
+    libLayout->setSpacing(4);
+    auto *libButtons = new QHBoxLayout;
+    libButtons->setContentsMargins(6, 6, 6, 0);
+    auto *addDirBtn = new QPushButton(tr("Add Directory"));
+    addDirBtn->setToolTip(tr("Add a music folder (opens Settings)"));
+    connect(addDirBtn, &QPushButton::clicked, this,
+            [this] { openSettings(/*startOnLibrary=*/true); });
+    libButtons->addWidget(addDirBtn);
+    libButtons->addStretch(1);
+    libLayout->addLayout(libButtons);
+    libLayout->addWidget(m_tree, 1);
+    m_leftTabs->addTab(libTab, tr("Library"));
 
     // Playlists tab — Create/Import buttons over the saved m3u8 list; double-click
     // a row to load+play, right-click to manage.
@@ -910,7 +930,7 @@ void MainWindow::applyCompact(bool compact)
         m_table->setColumnHidden(col, compact);
 }
 
-void MainWindow::openSettings()
+void MainWindow::openSettings(bool startOnLibrary)
 {
     QSettings s;
     const bool curAutoSync = s.value("library/autoSync", false).toBool();
@@ -924,6 +944,8 @@ void MainWindow::openSettings()
 
     SettingsDialog dlg(m_folders, curAutoSync, curRestoreQueue, curAutoPlay,
                        curYtDlp, curAudioDev, curTheme, curThemeFile, this);
+    if (startOnLibrary)
+        dlg.selectLibraryTab();   // "Add Directory" lands the user on the folders
 
     // "Sync now" reconciles the configured folders (mtime diff) without closing
     // the dialog; the scan runs on the worker and updates the status.
@@ -938,6 +960,11 @@ void MainWindow::openSettings()
 
     if (dlg.exec() != QDialog::Accepted) {
         Theme::apply(curTheme, curThemeFile);   // revert any preview
+        return;
+    }
+
+    if (dlg.resetRequested()) {
+        resetApplication();   // wipes everything and quits — don't persist below
         return;
     }
 
@@ -964,6 +991,36 @@ void MainWindow::openSettings()
         if (pathsChanged)
             emit requestScan(libraryFolderPaths(m_folders));
     }
+}
+
+void MainWindow::resetApplication()
+{
+    // Clean slate: erase every bit of persisted state, then quit so the next launch
+    // starts fresh. Confirmation already happened in the dialog.
+    m_resetting = true;   // suppress the save-on-quit handlers (see saveUiState /
+                          // flushQueueCache) so they don't recreate what we delete
+
+    // Close the DB first: on Windows the file can't be removed while the SQLite
+    // connection holds it open. Stopping the worker thread runs ~MusicLibrary, which
+    // closes and removes the connection.
+    if (m_libThread) {
+        m_library->cancel();
+        m_libThread->quit();
+        m_libThread->wait();
+        m_libThread = nullptr;   // already torn down; skip the repeat in ~MainWindow
+    }
+
+    // All data (library.db, art/, playlists/, queue.m3u8) lives under AppData; wipe
+    // the whole tree, then clear the QSettings store.
+    const QString dataDir =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (!dataDir.isEmpty())
+        QDir(dataDir).removeRecursively();
+    QSettings s;
+    s.clear();
+    s.sync();
+
+    qApp->quit();
 }
 
 void MainWindow::onLibraryLoaded(const QList<Track> &tracks)
@@ -1091,6 +1148,8 @@ void MainWindow::restoreSettings()
 
 void MainWindow::saveUiState() const
 {
+    if (m_resetting)
+        return;   // a reset just cleared QSettings — don't write keys back
     QSettings s;
     s.setValue("ui/geometry", saveGeometry());
     s.setValue("ui/splitter", m_splitter->saveState());

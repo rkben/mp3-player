@@ -16,6 +16,7 @@
 #include <QHeaderView>
 #include <QGroupBox>
 #include <QSettings>
+#include <QMessageBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QPlainTextEdit>
@@ -120,10 +121,12 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     QWidget *library = buildLibraryTab(autoSync);
     for (const LibraryFolder &f : folders)
         addFolderRow(f);   // m_folderTable exists once buildLibraryTab has run
-    tabs->addTab(scrollable(library), tr("Library"));
+    m_libraryPage = scrollable(library);
+    tabs->addTab(m_libraryPage, tr("Library"));
     tabs->addTab(scrollable(buildLogTab()), tr("Log"));
     tabs->addTab(scrollable(buildAboutTab()), tr("About"));
     tabs->setCurrentIndex(0);   // open on General
+    m_tabs = tabs;
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -157,6 +160,12 @@ QList<LibraryFolder> SettingsDialog::folders() const
 bool SettingsDialog::autoSync() const
 {
     return m_autoSync->isChecked();
+}
+
+void SettingsDialog::selectLibraryTab()
+{
+    if (m_tabs && m_libraryPage)
+        m_tabs->setCurrentWidget(m_libraryPage);
 }
 
 bool SettingsDialog::restoreQueue() const
@@ -259,6 +268,29 @@ QWidget *SettingsDialog::buildGeneralTab()
     discordForm->addRow(tr("Application ID:"), m_discordAppId);
     layout->addWidget(discordBox);
 #endif
+
+    // ---- Reset (destructive; at the very bottom) ----
+    auto *resetBox = new QGroupBox(tr("Reset"));
+    auto *resetLayout = new QVBoxLayout(resetBox);
+    auto *resetHint = new QLabel(
+        tr("Erase the library database, playlists, cached art, and all settings — "
+           "a clean slate. This cannot be undone."));
+    resetHint->setWordWrap(true);
+    auto *resetBtn = new QPushButton(tr("Reset application…"));
+    connect(resetBtn, &QPushButton::clicked, this, [this] {
+        const auto choice = QMessageBox::warning(
+            this, tr("Reset application"),
+            tr("Permanently erase the library database, playlists, cached cover art, "
+               "and all settings, then quit?\n\nThis cannot be undone."),
+            QMessageBox::Reset | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (choice == QMessageBox::Reset) {
+            m_resetRequested = true;
+            accept();   // host sees resetRequested() and performs the wipe
+        }
+    });
+    resetLayout->addWidget(resetHint);
+    resetLayout->addWidget(resetBtn, 0, Qt::AlignLeft);
+    layout->addWidget(resetBox);
 
     layout->addStretch();
     return general;
