@@ -91,6 +91,7 @@ private:
     void showTrackInfo(const Track &track);   // populate the info panel
     void updateQueueTitle();                  // "<playlist>[ [modified]] (N)" header
     QStringList queueStoredPaths() const;     // playlist-file form of the current queue
+    void flushQueueCache();                   // write any pending debounced queue cache
     void buildQueueMenu();                    // (re)populate the queue-actions dropdown
     // "Add to playlist" submenu; paths resolved lazily on click (cheap popup).
     void addToPlaylistMenu(QMenu *menu, std::function<QStringList()> paths);
@@ -148,6 +149,7 @@ private:
     QLineEdit *m_searchEdit;
     QComboBox *m_scope;
     QTimer *m_searchTimer;
+    QTimer *m_queueCacheTimer;   // debounces the resumable queue-cache write
     QLabel *m_status;
     QSlider *m_seek;
     QLabel *m_elapsed;

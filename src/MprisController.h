@@ -120,6 +120,7 @@ public:
     QVariantMap metadata() const;
     QString playbackStatus() const;
     bool canGoNext() const;
+    bool canGoPrevious() const;
     void emitSeeked(qlonglong us);
     void refreshMetadata() override;   // re-push Metadata (e.g. once art resolves)
 

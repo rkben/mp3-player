@@ -73,6 +73,7 @@ private:
     void createTracksTable();   // uri-keyed schema
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
     QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
+    void flushPendingImports();   // drain imports deferred during a scan
     static void upsert(QSqlQuery &q, const Track &t, qint64 mtime);
     static Track parseTags(const QString &path, qint64 mtime);
     QString extractArt(const QString &path, qint64 mtime);   // -> file:// URL or empty
@@ -82,6 +83,7 @@ private:
     QString m_artDir;     // cache dir for extracted embedded covers
     bool m_opened = false;
     bool m_scanning = false;   // re-entrancy guard while pumping events mid-scan
+    QList<Track> m_pendingImports;   // importTracks() calls deferred while scanning
     QAtomicInt m_cancel{0};
     QThreadPool m_pool;   // dedicated pool for parsing; cap set per scan
 };

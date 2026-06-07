@@ -78,8 +78,8 @@ bool isLeafNode(const QModelIndex &i)
     return !i.data(PathRole).toString().isEmpty() && !i.data(IsDirRole).toBool();
 }
 
-constexpr int kStatusTimeoutMs = 4000;   // how long a transient status line lingers
 constexpr int kSearchDebounceMs = 220;   // idle time after typing before searching
+constexpr int kQueueCacheDebounceMs = 800;   // coalesce burst queue edits into one write
 
 // Playlist list item: display text is the bare name; this holds the right-anchored
 // "(count - duration)" meta string drawn by PlaylistItemDelegate.
@@ -192,6 +192,17 @@ MainWindow::MainWindow(QWidget *parent)
     // Persist UI state on any quit path (window close, MPRIS Quit, etc.), not
     // just closeEvent — saveGeometry() is valid even once the window is hidden.
     connect(qApp, &QApplication::aboutToQuit, this, &MainWindow::saveUiState);
+    connect(qApp, &QApplication::aboutToQuit, this, &MainWindow::flushQueueCache);
+}
+
+void MainWindow::flushQueueCache()
+{
+    // A debounced queue edit may still be pending when we quit; write it now so the
+    // resume cache reflects the final queue rather than a stale snapshot.
+    if (m_queueCacheTimer->isActive()) {
+        m_queueCacheTimer->stop();
+        m_store.saveQueueCache(queueStoredPaths());
+    }
 }
 
 MainWindow::~MainWindow()
@@ -428,6 +439,16 @@ QWidget *MainWindow::buildQueuePanel()
         m_searching = true;
         emit requestSearch(m_searchEdit->text(), m_scope->currentIndex());
     });
+    // The resumable queue cache is rewritten in full on every queue mutation. A
+    // burst of single-track enqueues (or a "Play library" of tens of thousands)
+    // would otherwise be O(n^2) synchronous m3u8 writes on the GUI thread; debounce
+    // so only the settled queue is written once typing/clicking pauses.
+    m_queueCacheTimer = new QTimer(this);
+    m_queueCacheTimer->setSingleShot(true);
+    m_queueCacheTimer->setInterval(kQueueCacheDebounceMs);
+    connect(m_queueCacheTimer, &QTimer::timeout, this,
+            [this] { m_store.saveQueueCache(queueStoredPaths()); });
+
     connect(m_searchEdit, &QLineEdit::textChanged, this, &MainWindow::scheduleSearch);
     connect(m_scope, &QComboBox::currentIndexChanged, this, [this](int) {
         if (!m_searchEdit->text().trimmed().isEmpty())
@@ -1668,7 +1689,7 @@ void MainWindow::onQueueChanged(const QList<Track> &queue)
         QSettings().setValue("ui/queueDirty", m_queueDirty);
     }
     updateQueueTitle();
-    m_store.saveQueueCache(queueStoredPaths());   // keep the resumable cache current
+    m_queueCacheTimer->start();   // debounced; flushed on quit (see flushQueueCache)
 
     if (m_searching)
         return;   // search browse mode owns the table; restored when search clears

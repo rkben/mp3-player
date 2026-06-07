@@ -241,16 +241,13 @@ QWidget *SettingsDialog::buildLibraryTab(bool autoSync)
     folderBtns->addStretch();
     libLayout->addLayout(folderBtns);
 
-    auto *form = new QFormLayout;
-    form->setSpacing(8);
-
-    m_autoSync = new QCheckBox(tr("Automatically sync the library"));
+    // Auto-sync isn't implemented yet, so the control is hidden rather than shown
+    // as a non-functional checkbox. Kept as a hidden member (no layout row) so the
+    // persisted "library/autoSync" value round-trips untouched until the feature
+    // lands and a real row is restored here.
+    m_autoSync = new QCheckBox(this);
     m_autoSync->setChecked(autoSync);
-    m_autoSync->setToolTip(tr("Watch the library folders and sync changes "
-                              "automatically. (Not implemented yet.)"));
-    form->addRow(tr("Auto sync:"), m_autoSync);
-
-    libLayout->addLayout(form);
+    m_autoSync->hide();
 
     // Manual sync: a quick mtime reconcile of all configured folders.
     auto *syncRow = new QHBoxLayout;

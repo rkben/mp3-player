@@ -86,7 +86,7 @@ qlonglong MprisPlayerAdaptor::position() const
 }
 
 bool MprisPlayerAdaptor::canGoNext() const { return m_c->canGoNext(); }
-bool MprisPlayerAdaptor::canGoPrevious() const { return m_c->canGoNext(); }
+bool MprisPlayerAdaptor::canGoPrevious() const { return m_c->canGoPrevious(); }
 bool MprisPlayerAdaptor::canPlay() const { return m_c->player()->queueSize() > 0; }
 
 void MprisPlayerAdaptor::Next()      { m_c->player()->next(); }
@@ -161,6 +161,10 @@ QString MprisController::playbackStatus() const
 }
 
 bool MprisController::canGoNext() const { return m_player->queueSize() > 0; }
+// "Previous" is meaningful whenever there's a queue: previous() rewinds the current
+// track, walks play history, or steps back an index. Same condition as next() for a
+// queue-based player, but spelled out so the bus interface reads honestly.
+bool MprisController::canGoPrevious() const { return m_player->queueSize() > 0; }
 
 QVariantMap MprisController::metadata() const
 {
@@ -223,7 +227,7 @@ void MprisController::onCurrentTrackChanged()
 {
     pushPlayerProps({{"Metadata", metadata()},
                      {"CanGoNext", canGoNext()},
-                     {"CanGoPrevious", canGoNext()},
+                     {"CanGoPrevious", canGoPrevious()},
                      {"CanPlay", m_player->queueSize() > 0}});
 }
 

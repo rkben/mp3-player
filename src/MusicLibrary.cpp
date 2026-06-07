@@ -17,6 +17,7 @@
 #include <QCoreApplication>
 
 #include <QCryptographicHash>
+#include <QDate>
 #include <QRegularExpression>
 #include <QUrl>
 
@@ -234,7 +235,12 @@ Track MusicLibrary::parseTags(const QString &path, qint64 /*mtime*/)
                 const auto m = QRegularExpression(QStringLiteral("\\d{4}")).match(s);
                 if (m.hasMatch()) {
                     const int y = m.captured().toInt();
-                    if (y >= 1000 && y <= 9999) { t.year = y; break; }
+                    // Bound to plausible recorded-audio years so a separatorless
+                    // MMDD value (e.g. "1231") isn't mistaken for a year.
+                    if (y >= 1860 && y <= QDate::currentDate().year() + 1) {
+                        t.year = y;
+                        break;
+                    }
                 }
             }
         }
@@ -275,7 +281,19 @@ void MusicLibrary::enrichMetadata(const QString &path, const QString &title,
 
 void MusicLibrary::importTracks(const QList<Track> &tracks)
 {
-    if (!ensureDb() || tracks.isEmpty())
+    if (tracks.isEmpty())
+        return;
+
+    // A cold scan pumps the worker event loop mid-transaction (see scan()), so this
+    // slot can land while the scan's batch transaction is open. SQLite has no nested
+    // transactions — committing here would close the scan's batch early. Defer the
+    // import; flushPendingImports() drains it once the scan finishes.
+    if (m_scanning) {
+        m_pendingImports += tracks;
+        return;
+    }
+
+    if (!ensureDb())
         return;
 
     m_db.transaction();
@@ -303,6 +321,17 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
     m_db.commit();
 
     emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
+}
+
+void MusicLibrary::flushPendingImports()
+{
+    if (m_pendingImports.isEmpty())
+        return;
+    // m_scanning is already false here, so importTracks() runs its own transaction
+    // normally rather than re-deferring. take() guards against re-entrancy.
+    const QList<Track> pending = std::move(m_pendingImports);
+    m_pendingImports.clear();
+    importTracks(pending);
 }
 
 void MusicLibrary::resolveArt(const QString &path)
@@ -486,7 +515,12 @@ void MusicLibrary::scan(const QStringList &folders)
     if (m_scanning)
         return;
     m_scanning = true;
-    struct ScanGuard { bool &f; ~ScanGuard() { f = false; } } scanGuard{m_scanning};
+    // On every exit path clear the guard *then* drain any imports that arrived while
+    // the scan held the transaction open (m_scanning is false again, so they run).
+    struct ScanGuard {
+        MusicLibrary *self;
+        ~ScanGuard() { self->m_scanning = false; self->flushPendingImports(); }
+    } scanGuard{this};
 
     m_cancel.storeRelaxed(0);
 

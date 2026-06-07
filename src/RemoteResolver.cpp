@@ -43,10 +43,14 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
         return;
     }
 
+    cancelCurrent();   // a newer request supersedes any still-running resolve
+
     auto *proc = new QProcess(this);
     // finished and errorOccurred can both fire for one failure (e.g. a crash);
     // this one-shot guard ensures we emit + clean up exactly once.
     auto done = std::make_shared<bool>(false);
+    m_proc = proc;
+    m_done = done;
     // Best audio-only stream (falls back to best combined if none), URL only.
     const QStringList args{QStringLiteral("-f"), QStringLiteral("bestaudio/best"),
                            QStringLiteral("-g"), pageUrl.toString()};
@@ -55,6 +59,7 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
             [this, proc, pageUrl, done](int code, QProcess::ExitStatus status) {
                 if (*done) return;
                 *done = true;
+                if (m_proc == proc) m_proc = nullptr;   // it's no longer in-flight
                 proc->deleteLater();
                 if (status != QProcess::NormalExit || code != 0) {
                     const QString err = QString::fromUtf8(proc->readAllStandardError())
@@ -88,12 +93,27 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
                 // finished() may not fire on a start failure; report and clean up.
                 if (*done) return;
                 *done = true;
+                if (m_proc == proc) m_proc = nullptr;
                 emit failed(pageUrl, proc->errorString());
                 proc->deleteLater();
             });
 
     suppressConsoleWindow(proc);
     proc->start(exe, args);
+}
+
+void RemoteResolver::cancelCurrent()
+{
+    if (!m_proc)
+        return;
+    // Mute the one-shot guard so the kill's finished()/errorOccurred() can't emit a
+    // spurious failed() for a request the caller has already moved past.
+    if (m_done)
+        *m_done = true;
+    m_proc->kill();
+    m_proc->deleteLater();
+    m_proc = nullptr;
+    m_done.reset();
 }
 
 RemoteResolver::RemoteResolver(QObject *parent) : QObject(parent) {}

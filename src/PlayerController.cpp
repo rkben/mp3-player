@@ -206,6 +206,9 @@ void PlayerController::togglePlayPause()
 
 void PlayerController::next()
 {
+    // A user-initiated skip is a fresh intent, like jumpTo/playQueue: clear the
+    // error chain so stepping through history doesn't trip the all-bad guard early.
+    m_consecutiveErrors = 0;
     // If we'd walked back into history, step forward through it before picking new.
     if (m_historyPos >= 0 && m_historyPos + 1 < m_history.size()) {
         ++m_historyPos;
@@ -223,6 +226,7 @@ void PlayerController::previous()
 {
     if (m_queue.isEmpty())
         return;
+    m_consecutiveErrors = 0;   // user-initiated: fresh intent (see next())
     // Restart current track if we're more than a few seconds in (common player
     // behaviour: "previous" first rewinds, then steps back).
     constexpr qint64 kRestartThresholdMs = 3000;
