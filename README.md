@@ -1,21 +1,59 @@
 # Pocket Player
-Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates like 250 USD in tokens. I haven't read anything in here.
-
-
 A media player.
 
 
-## Features
+Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates around 280 USD in tokens. (Random evaluation by max effort)
 
-- Open folders and recursively load audio (`.mp3 .flac .ogg .m4a .wav`)
-- Play / pause / next / previous, seek, volume
-- Shuffle and repeat (off / all / one)
-- Tag metadata via TagLib, cached in SQLite (path+mtime); parallel cold scan
-- m3u8 playlists — create, import, save, append
-- Remote streaming: import tracks/playlists from any `yt-dlp`-supported URL;
-  the stream is resolved on demand at play time
-- MPRIS D-Bus control on Linux
-- MediaSession on MacOS
+
+I haven't read most of this, initially an experiment and turned out okay.
+
+
+## Features
+- Intentionally Simple
+- Local media playback (duh)
+  - Multiple media sources
+  - Metadata via TagLib, cached to SQLite db
+- Local media info via taglib
+- Remote media streaming via `yt-dlp`
+  - Treated transparently-ish, indexed into DB with local media
+  - Imported via `yt-dlp`
+  - Few specific sites handled: YouTube, Soundcloud, Bandcamp, ReverbNation, HearThis.at
+  - Best-effort for Artist, Album, etc; for everything else `yt-dlp` supports.
+- Mixed playlists with local and remote media, saved as m3u8
+- MPRIS on Linux, MediaSession on MacOS
+- Self-managed `yt-dlp`, or checks `$PATH`
+
+
+## In-Progress (by prio)
+- Import resume
+ - probably another table for imports, dump from `yt-dlp --flat-playlist`, check against tracks table
+- DB invalidation improvements (probably too fragile as-is)
+- Checking for new updates via GH latest/releases
+- Better custom stylesheet support
+- Linux AppImage
+- Windows build *sigh*
+- Handful of UI tweaks
+  - Spacing of elements
+  - Horizontal collapsing is wonky
+  - Better matching Qt6 to MacOS
+  - Probably tweaks to match Windows *sigh*
+- Building on Woodpecker -> push to GH releases
+- MacOS's implementation of SMB is garbage and slow
+  - #wontfix but I'm mad
+- Edge cases for some interaction
+- Human Code Review™
+
+### Maybe
+- webdav? I might be the only one who uses this
+- Snazzy *audio reactive* shader animations, can see this getting out of hand
+
+## Images
+![Pocket Player - KDE native theme](_img/app.png)
+![Included Dark theme example](_img/app_themed.png)
+![Settings - General](_img/settings.png)
+![Settings - Library](_img/setting_library.png)
+![Playlist - Import](_img/playlist_import.png)
+![Playlist - Editor](_img/playlist_import.png)
 
 ## Build
 
