@@ -64,4 +64,7 @@ private:
     QLineEdit *m_ytDlpEdit;
     QComboBox *m_audioCombo;
     QPlainTextEdit *m_logView = nullptr;
+#ifdef HAVE_DISCORD_RPC
+    QLineEdit *m_discordAppId = nullptr;   // self-contained: persists to QSettings
+#endif
 };

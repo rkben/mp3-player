@@ -100,6 +100,26 @@ endif()
 
 message(STATUS "MPRIS D-Bus support: ${ENABLE_MPRIS}")
 
+# Discord Rich Presence — cross-platform (talks Discord's local IPC socket directly
+# over QLocalSocket, so no extra dependency). On by default; turn off with
+# -DENABLE_DISCORD_RPC=OFF. The application/client ID is baked in at build time and
+# defaults to Pocket Player's own app; override with -DDISCORD_APP_ID=<id> or at
+# runtime via Settings.
+option(ENABLE_DISCORD_RPC "Enable Discord Rich Presence" ON)
+set(DISCORD_APP_ID "1513210138440503327"
+    CACHE STRING "Discord application (client) ID for Rich Presence")
+if(ENABLE_DISCORD_RPC)
+    target_sources(mp3player PRIVATE src/DiscordPresence.cpp src/DiscordPresence.h)
+    target_compile_definitions(mp3player PRIVATE
+        HAVE_DISCORD_RPC DISCORD_APP_ID="${DISCORD_APP_ID}")
+    if(DISCORD_APP_ID STREQUAL "")
+        message(WARNING "ENABLE_DISCORD_RPC is ON but DISCORD_APP_ID is empty — "
+                        "presence will stay idle until set (build with "
+                        "-DDISCORD_APP_ID=<id> or via Settings).")
+    endif()
+endif()
+message(STATUS "Discord Rich Presence: ${ENABLE_DISCORD_RPC}")
+
 # ---- macOS .app bundle (for macdeployqt / .dmg packaging) ----
 # A relocatable, self-contained .app is required before macdeployqt can gather
 # the Qt frameworks + FFmpeg backend and produce a .dmg. Plain executables can't

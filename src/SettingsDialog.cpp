@@ -14,6 +14,7 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QGroupBox>
+#include <QSettings>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QPlainTextEdit>
@@ -115,6 +116,13 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+#ifdef HAVE_DISCORD_RPC
+    // Persist the Discord override on OK (this field doesn't round-trip via the host).
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        QSettings().setValue(QStringLiteral("discord/appId"),
+                             m_discordAppId->text().trimmed());
+    });
+#endif
     root->addWidget(buttons);
 }
 
@@ -219,6 +227,25 @@ QWidget *SettingsDialog::buildGeneralTab()
     sources->setFont(hintFont);
     importForm->addRow(sources);   // single-widget row spans the full groupbox width
     layout->addWidget(importBox);
+
+#ifdef HAVE_DISCORD_RPC
+    // ---- Discord (only present in a Discord-enabled build) ----
+    // Self-contained: loads from / saves to QSettings("discord/appId") directly
+    // rather than threading an #ifdef'd value through the constructor/getters. Blank
+    // = use the application ID baked in at build (shown as the placeholder).
+    auto *discordBox = new QGroupBox(tr("Discord"));
+    auto *discordForm = new QFormLayout(discordBox);
+    discordForm->setSpacing(8);
+    m_discordAppId = new QLineEdit(
+        QSettings().value(QStringLiteral("discord/appId")).toString());
+    const QString baked = QString::fromLatin1(DISCORD_APP_ID).trimmed();
+    m_discordAppId->setPlaceholderText(
+        baked.isEmpty() ? tr("Discord application ID") : baked);
+    m_discordAppId->setToolTip(tr("Override the built-in Discord application ID. "
+                                  "Blank uses the default. Applies on next launch."));
+    discordForm->addRow(tr("Application ID:"), m_discordAppId);
+    layout->addWidget(discordBox);
+#endif
 
     layout->addStretch();
     return general;

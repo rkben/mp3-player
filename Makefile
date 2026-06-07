@@ -9,6 +9,18 @@ BUILD      := $(SRC)/build
 BUILD_TYPE ?= Release
 JOBS       ?= $(shell nproc)
 
+# Build flags forwarded to cmake (see README "Build options" for the full set).
+# Discord Rich Presence is ON by default with Pocket Player's app ID baked in by
+# CMake; disable with `make build DISCORD_RPC=OFF`, or use your own app with
+# `make build DISCORD_APP_ID=<id>`. DISCORD_APP_ID is only forwarded when set, so a
+# blank value leaves CMake's baked-in default intact.
+MPRIS          ?= ON
+DISCORD_RPC    ?= ON
+DISCORD_APP_ID ?=
+CMAKE_FLAGS := -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+               -DENABLE_MPRIS=$(MPRIS) -DENABLE_DISCORD_RPC=$(DISCORD_RPC) \
+               $(if $(DISCORD_APP_ID),-DDISCORD_APP_ID=$(DISCORD_APP_ID),)
+
 # ---- macOS (official-Qt build; mirrors notes/macos.md + the `macos` preset) ----
 # Unlike the Linux targets above, these use the current directory (there's no
 # dual-path AUTOMOC issue on macOS) and the official Qt's qt-cmake, which sets the
@@ -28,7 +40,7 @@ DEPLOY_TARGET ?= 13.0
 
 ## configure: generate the build tree
 configure:
-	cmake -B $(BUILD) -S $(SRC) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	cmake -B $(BUILD) -S $(SRC) $(CMAKE_FLAGS)
 
 ## build: compile the app (configures if needed)
 build:
@@ -44,7 +56,7 @@ run: build
 
 ## demo: build the QRhiWidget shader demo (enables BUILD_SHADER_DEMO)
 demo:
-	cmake -B $(BUILD) -S $(SRC) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DBUILD_SHADER_DEMO=ON
+	cmake -B $(BUILD) -S $(SRC) $(CMAKE_FLAGS) -DBUILD_SHADER_DEMO=ON
 	cmake --build $(BUILD) -j$(JOBS) --target shader_demo
 
 ## demo-run: build and launch the shader demo

@@ -15,6 +15,10 @@
 #include "ImportDialog.h"
 #include "PlaylistEditorDialog.h"
 #include "TrackListModel.h"   // totalDurationMs()
+
+#ifdef HAVE_DISCORD_RPC
+#include "DiscordPresence.h"
+#endif
 #include "MediaSession.h"
 
 #include <QVBoxLayout>
@@ -187,6 +191,12 @@ MainWindow::MainWindow(QWidget *parent)
             });
 
     m_session = MediaSession::create(m_controller, this, this);   // null if none
+
+#ifdef HAVE_DISCORD_RPC
+    // Cross-platform Discord Rich Presence, alongside (not instead of) the OS media
+    // session. Parented to this window; idle when no app ID is configured.
+    new DiscordPresence(m_controller, this);
+#endif
 
     startLibraryThread();
     restoreSettings();

@@ -1,11 +1,9 @@
 # Pocket Player
-Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates like 130 USD in tokens. I haven't read anything in here.
+Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates like 250 USD in tokens. I haven't read anything in here.
 
 
+A media player.
 
-A lightweight, mobile-styled music player built with **Qt 6 Widgets** and
-**Qt Multimedia**. Targets the desktop but uses a phone-shaped, touch-friendly
-UI, with no WebEngine or QML/Qt Quick dependency.
 
 ## Features
 
@@ -16,7 +14,8 @@ UI, with no WebEngine or QML/Qt Quick dependency.
 - m3u8 playlists — create, import, save, append
 - Remote streaming: import tracks/playlists from any `yt-dlp`-supported URL;
   the stream is resolved on demand at play time
-- MPRIS D-Bus control on Linux — media keys, desktop now-playing, `playerctl`
+- MPRIS D-Bus control on Linux
+- MediaSession on MacOS
 
 ## Build
 
@@ -46,8 +45,11 @@ cmake --build build -j
 | Option | Default | Effect |
 |--------|---------|--------|
 | `ENABLE_MPRIS` | `ON` (Linux), `OFF` elsewhere | MPRIS D-Bus media control. Pulls in `Qt6::DBus`; off = no D-Bus dependency. |
+| `ENABLE_DISCORD_RPC` | `ON` | Discord Rich Presence (now-playing status). Cross-platform, no extra dependency (talks Discord's local IPC socket via `QLocalSocket`). |
+| `DISCORD_APP_ID` | Pocket Player's app | Discord application/client ID baked into the build. Override to use your own app; can also be overridden at runtime in Settings → Discord. |
+| `BUILD_SHADER_DEMO` | `OFF` | Build the standalone `QRhiWidget` shader/visualizer demo. |
 
-e.g. `cmake -B build -S . -DENABLE_MPRIS=OFF`
+e.g. `cmake -B build -S . -DENABLE_MPRIS=OFF -DENABLE_DISCORD_RPC=OFF`
 
 ## Layout
 
