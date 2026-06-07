@@ -28,6 +28,10 @@ public:
     // set, else the compiled-in DISCORD_APP_ID. Empty -> the feature stays idle.
     static QString effectiveAppId();
 
+    // Live enable/disable (Settings toggle): off clears the status and disconnects;
+    // on reconnects. Persisted state is QSettings("discord/enabled").
+    void setEnabled(bool on);
+
 private:
     void tryConnect();             // attempt the next/available IPC socket
     void onConnected();            // send the handshake
@@ -45,5 +49,6 @@ private:
     QByteArray m_rx;               // accumulates partial frames
     QString m_appId;
     bool m_ready = false;          // handshake acknowledged (READY received)
+    bool m_enabled = true;         // Settings toggle; off = idle + disconnected
     int m_nonce = 0;
 };

@@ -195,8 +195,9 @@ MainWindow::MainWindow(QWidget *parent)
 
 #ifdef HAVE_DISCORD_RPC
     // Cross-platform Discord Rich Presence, alongside (not instead of) the OS media
-    // session. Parented to this window; idle when no app ID is configured.
-    new DiscordPresence(m_controller, this);
+    // session. Parented to this window; idle when no app ID is configured. Held so
+    // the Settings enable toggle can flip it live.
+    m_discord = new DiscordPresence(m_controller, this);
 #endif
 
     startLibraryThread();
@@ -402,6 +403,9 @@ void MainWindow::buildUi()
     // --- Bottom status bar: only shown during background work (e.g. syncing) ---
     m_status = new QLabel;
     m_status->setObjectName("status");
+    // Nudge the text right so it clears macOS's rounded bottom-left window corner.
+    // Set in code (not just the Dark QSS) so it also applies under the native style.
+    m_status->setContentsMargins(8, 0, 0, 0);
     m_status->hide();
     root->addWidget(m_status);
 
@@ -958,8 +962,22 @@ void MainWindow::openSettings(bool startOnLibrary)
     connect(&dlg, &SettingsDialog::themeChanged, this,
             [](Theme::Mode mode, const QString &file) { Theme::apply(mode, file); });
 
+    // Live output-device switch (reverted below on Cancel).
+    connect(&dlg, &SettingsDialog::audioDeviceChanged, this,
+            [this](const QByteArray &id) { m_controller->setAudioDevice(id); });
+
+#ifdef HAVE_DISCORD_RPC
+    const bool curDiscordEnabled = s.value("discord/enabled", true).toBool();
+    connect(&dlg, &SettingsDialog::discordEnabledChanged, this,
+            [this](bool on) { if (m_discord) m_discord->setEnabled(on); });
+#endif
+
     if (dlg.exec() != QDialog::Accepted) {
-        Theme::apply(curTheme, curThemeFile);   // revert any preview
+        Theme::apply(curTheme, curThemeFile);          // revert any preview
+        m_controller->setAudioDevice(curAudioDev);     // revert live device switch
+#ifdef HAVE_DISCORD_RPC
+        if (m_discord) m_discord->setEnabled(curDiscordEnabled);
+#endif
         return;
     }
 

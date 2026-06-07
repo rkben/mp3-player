@@ -39,8 +39,10 @@ private:
     void onModeChanged(int index);
     void applyLeftFilter();
     void onPlaylistSelected(int index);
+    void onPlaylistActivated(int index);   // handles the "New playlist…" row
     void addSelected();        // left selection -> right list
     void removeSelected();     // drop right-list selection
+    void deduplicate();        // drop later same-artist+title rows (keep first)
     void save();
     void reject() override;    // intercept Close to prompt on unsaved changes
 

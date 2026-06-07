@@ -15,6 +15,7 @@
 #include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QProcess>
+#include <QUrl>
 
 ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
                            const QString &savedAppend, QWidget *parent)
@@ -122,7 +123,15 @@ void ImportDialog::runCheck()
 
         if (code != 0 && count == 0) {
             // Short reason in the label; the full yt-dlp output in the error box.
-            m_info->setText(tr("Couldn't read that URL."));
+            // HearThis.at and ReverbNation only expose individual tracks in yt-dlp,
+            // so an uploader/playlist URL fails — give a clearer reason than "couldn't
+            // read" (see notes/new_remote_sources.md).
+            const QString host = QUrl(m_url->text().trimmed()).host();
+            const bool singleOnly =
+                host.contains(QLatin1String("hearthis.at"), Qt::CaseInsensitive)
+                || host.contains(QLatin1String("reverbnation.com"), Qt::CaseInsensitive);
+            m_info->setText(singleOnly ? tr("This source only supports single tracks.")
+                                       : tr("Couldn't read that URL."));
             if (err.isEmpty()) {
                 m_errorView->hide();
             } else {

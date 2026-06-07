@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QDialogButtonBox>
 #include <QInputDialog>
+#include <QSet>
 #include <QMessageBox>
 #include <QAbstractItemView>
 
@@ -86,10 +87,16 @@ PlaylistEditorDialog::PlaylistEditorDialog(const QList<Track> &library,
 
     m_rightFooter = new QLabel;
 
+    auto *dedupeBtn = new QPushButton(tr("Deduplicate"));
+    dedupeBtn->setToolTip(tr("Remove repeated tracks (same artist and title)."));
+
     auto *rightCol = new QVBoxLayout;
     rightCol->addWidget(m_playlistCombo);
     rightCol->addWidget(m_rightList, 1);
-    rightCol->addWidget(m_rightFooter);
+    auto *rightBottom = new QHBoxLayout;
+    rightBottom->addWidget(m_rightFooter, 1);
+    rightBottom->addWidget(dedupeBtn);
+    rightCol->addLayout(rightBottom);
 
     auto *lists = new QHBoxLayout;
     lists->addLayout(leftCol, 1);
@@ -117,6 +124,9 @@ PlaylistEditorDialog::PlaylistEditorDialog(const QList<Track> &library,
 
     connect(m_playlistCombo, &QComboBox::currentIndexChanged, this,
             &PlaylistEditorDialog::onPlaylistSelected);
+    connect(m_playlistCombo, &QComboBox::activated, this,
+            &PlaylistEditorDialog::onPlaylistActivated);
+    connect(dedupeBtn, &QPushButton::clicked, this, &PlaylistEditorDialog::deduplicate);
 
     // Any content change to the right list (add/remove/drag-reorder) dirties it and
     // refreshes the footer; programmatic loads are wrapped to suppress the dirty flag.
@@ -161,39 +171,52 @@ void PlaylistEditorDialog::onPlaylistSelected(int index)
 {
     if (m_comboGuard || index < 0)
         return;
+    // The "New playlist…" row is handled by onPlaylistActivated() — which also fires
+    // when it's the only entry (no index change, so currentIndexChanged wouldn't).
+    if (m_playlistCombo->itemData(index).toInt() == kNewPlaylistData)
+        return;
 
     // Unsaved edits on the current playlist must be resolved before switching away.
     if (!confirmDiscardIfDirty()) {
         rebuildPlaylistCombo(m_currentName);   // revert the combo selection
         return;
     }
+    loadPlaylistIntoRight(m_playlistCombo->itemText(index));
+}
 
-    if (m_playlistCombo->itemData(index).toInt() == kNewPlaylistData) {
-        const QString name =
-            QInputDialog::getText(this, tr("New Playlist"), tr("Playlist name:"))
-                .trimmed();
-        if (name.isEmpty()) {
-            rebuildPlaylistCombo(m_currentName);
-            return;
-        }
-        if (m_store->exists(name)) {
-            // Already exists — just edit it rather than clobber.
-            loadPlaylistIntoRight(name);
-            rebuildPlaylistCombo(name);
-            return;
-        }
-        // A brand-new, empty playlist: created on Save.
-        m_currentName = name;
-        m_comboGuard = true;
-        m_rightList->clear();
-        m_comboGuard = false;
-        refreshRightFooter();
-        markDirty(true);   // Save persists the (possibly empty) new playlist
-        rebuildPlaylistCombo(name);
+void PlaylistEditorDialog::onPlaylistActivated(int index)
+{
+    // Only the "New playlist…" sentinel; real playlists are handled by selection.
+    // Using activated() (not currentIndexChanged) means this also works when the
+    // sentinel is the sole entry and already current — the no-playlists case.
+    if (m_comboGuard || index < 0
+        || m_playlistCombo->itemData(index).toInt() != kNewPlaylistData)
+        return;
+
+    if (!confirmDiscardIfDirty()) {
+        rebuildPlaylistCombo(m_currentName);
         return;
     }
 
-    loadPlaylistIntoRight(m_playlistCombo->itemText(index));
+    const QString name =
+        QInputDialog::getText(this, tr("New Playlist"), tr("Playlist name:")).trimmed();
+    if (name.isEmpty()) {
+        rebuildPlaylistCombo(m_currentName);
+        return;
+    }
+    if (m_store->exists(name)) {
+        loadPlaylistIntoRight(name);   // already exists — edit it rather than clobber
+        rebuildPlaylistCombo(name);
+        return;
+    }
+    // A brand-new, empty playlist: created on Save.
+    m_currentName = name;
+    m_comboGuard = true;
+    m_rightList->clear();
+    m_comboGuard = false;
+    refreshRightFooter();
+    markDirty(true);   // Save persists the (possibly empty) new playlist
+    rebuildPlaylistCombo(name);
 }
 
 void PlaylistEditorDialog::loadPlaylistIntoRight(const QString &name)
@@ -257,6 +280,25 @@ void PlaylistEditorDialog::removeSelected()
     const QList<QListWidgetItem *> sel = m_rightList->selectedItems();
     for (QListWidgetItem *item : sel)
         delete m_rightList->takeItem(m_rightList->row(item));
+}
+
+void PlaylistEditorDialog::deduplicate()
+{
+    // Best-effort: keep the first occurrence of each artist+title (trimmed,
+    // case-insensitive) and drop later repeats. May merge variants that share a
+    // title (live vs studio) — accepted for a one-click cleanup.
+    QSet<QString> seen;
+    for (int i = 0; i < m_rightList->count(); /* advance conditionally */) {
+        const Track t = m_rightList->item(i)->data(Qt::UserRole).value<Track>();
+        const QString key = (t.artist.trimmed() + QLatin1Char('')
+                             + t.title.trimmed()).toLower();
+        if (seen.contains(key)) {
+            delete m_rightList->takeItem(i);   // don't advance; row i is now the next
+        } else {
+            seen.insert(key);
+            ++i;
+        }
+    }
 }
 
 QList<Track> PlaylistEditorDialog::rightTracks() const

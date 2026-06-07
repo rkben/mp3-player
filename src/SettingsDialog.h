@@ -49,6 +49,12 @@ signals:
     void syncRequested();
     // Emitted whenever the theme selection changes, for a live preview.
     void themeChanged(Theme::Mode mode, const QString &file);
+    // Emitted on output-device selection so the host can switch audio immediately.
+    void audioDeviceChanged(const QByteArray &id);
+#ifdef HAVE_DISCORD_RPC
+    // Emitted on the Discord enable toggle, applied live by the host.
+    void discordEnabledChanged(bool on);
+#endif
 
 private slots:
     void addFolder();
@@ -76,6 +82,9 @@ private:
     QTabWidget *m_tabs = nullptr;
     QWidget *m_libraryPage = nullptr;   // the Library tab's scroll page, for selection
     bool m_resetRequested = false;
+#ifdef HAVE_DISCORD_RPC
+    QCheckBox *m_discordEnabled = nullptr;
+#endif
 #ifdef HAVE_DISCORD_RPC
     QLineEdit *m_discordAppId = nullptr;   // self-contained: persists to QSettings
 #endif

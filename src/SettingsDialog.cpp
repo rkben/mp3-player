@@ -137,8 +137,9 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
 #ifdef HAVE_DISCORD_RPC
     // Persist the Discord override on OK (this field doesn't round-trip via the host).
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        QSettings().setValue(QStringLiteral("discord/appId"),
-                             m_discordAppId->text().trimmed());
+        QSettings s;
+        s.setValue(QStringLiteral("discord/appId"), m_discordAppId->text().trimmed());
+        s.setValue(QStringLiteral("discord/enabled"), m_discordEnabled->isChecked());
     });
 #endif
     root->addWidget(buttons);
@@ -226,18 +227,30 @@ QWidget *SettingsDialog::buildGeneralTab()
     themeForm->addRow(tr("Stylesheet:"), fileRow);
     layout->addWidget(themeBox);
 
-    // ---- Audio ----
-    auto *audioBox = new QGroupBox(tr("Audio"));
+    // ---- Playback ----
+    auto *audioBox = new QGroupBox(tr("Playback"));
     auto *audioForm = new QFormLayout(audioBox);
     audioForm->setSpacing(8);
     audioForm->addRow(tr("Output device:"), m_audioCombo);
+    // Apply the device live so the user hears the change immediately; the host
+    // reverts on Cancel (mirrors the theme live-preview).
+    connect(m_audioCombo, &QComboBox::currentIndexChanged, this, [this] {
+        emit audioDeviceChanged(m_audioCombo->currentData().toByteArray());
+    });
     layout->addWidget(audioBox);
 
     // ---- Import ----
     auto *importBox = new QGroupBox(tr("Import"));
     auto *importForm = new QFormLayout(importBox);
     importForm->setSpacing(8);
-    importForm->addRow(tr("yt-dlp path:"), m_ytDlpEdit);
+    // yt-dlp path + Reset (clears the override so ytDlpPath() re-probes $PATH).
+    auto *ytRow = new QHBoxLayout;
+    auto *ytReset = new QPushButton(tr("Reset"));
+    ytReset->setToolTip(tr("Clear the override and use the yt-dlp found on $PATH."));
+    connect(ytReset, &QPushButton::clicked, this, [this] { m_ytDlpEdit->clear(); });
+    ytRow->addWidget(m_ytDlpEdit, 1);
+    ytRow->addWidget(ytReset);
+    importForm->addRow(tr("yt-dlp path:"), ytRow);
     // Curated list of sources known to map cleanly (anything yt-dlp supports still
     // imports generically — this is guidance, not a gate). Extend as sources are
     // tuned in Importer::parseLine. A full-width hint under the path: a word-wrap
@@ -250,6 +263,10 @@ QWidget *SettingsDialog::buildGeneralTab()
     hintFont.setPointSize(qMax(1, hintFont.pointSize() - 1));
     sources->setFont(hintFont);
     importForm->addRow(sources);   // single-widget row spans the full groupbox width
+    auto *bestEffort = new QLabel(tr("Best effort: everything yt-dlp supports."));
+    bestEffort->setWordWrap(true);
+    bestEffort->setFont(hintFont);
+    importForm->addRow(bestEffort);
     layout->addWidget(importBox);
 
 #ifdef HAVE_DISCORD_RPC
@@ -260,6 +277,15 @@ QWidget *SettingsDialog::buildGeneralTab()
     auto *discordBox = new QGroupBox(tr("Discord"));
     auto *discordForm = new QFormLayout(discordBox);
     discordForm->setSpacing(8);
+
+    // Enable toggle — applied live by the host (connect/disconnect), saved on OK.
+    m_discordEnabled = new QCheckBox(tr("Show now-playing as a Discord status"));
+    m_discordEnabled->setChecked(
+        QSettings().value(QStringLiteral("discord/enabled"), true).toBool());
+    connect(m_discordEnabled, &QCheckBox::toggled, this,
+            [this](bool on) { emit discordEnabledChanged(on); });
+    discordForm->addRow(m_discordEnabled);
+
     m_discordAppId = new QLineEdit(
         QSettings().value(QStringLiteral("discord/appId")).toString());
     const QString baked = QString::fromLatin1(DISCORD_APP_ID).trimmed();
@@ -267,7 +293,14 @@ QWidget *SettingsDialog::buildGeneralTab()
         baked.isEmpty() ? tr("Discord application ID") : baked);
     m_discordAppId->setToolTip(tr("Override the built-in Discord application ID. "
                                   "Blank uses the default. Applies on next launch."));
-    discordForm->addRow(tr("Application ID:"), m_discordAppId);
+    // App ID + Reset (clears the override so the baked-in default is used).
+    auto *idRow = new QHBoxLayout;
+    auto *idReset = new QPushButton(tr("Reset"));
+    idReset->setToolTip(tr("Clear the override and use the built-in application ID."));
+    connect(idReset, &QPushButton::clicked, this, [this] { m_discordAppId->clear(); });
+    idRow->addWidget(m_discordAppId, 1);
+    idRow->addWidget(idReset);
+    discordForm->addRow(tr("Application ID:"), idRow);
     layout->addWidget(discordBox);
 #endif
 

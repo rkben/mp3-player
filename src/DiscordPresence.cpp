@@ -81,6 +81,7 @@ DiscordPresence::DiscordPresence(PlayerController *player, QObject *parent)
     : QObject(parent), m_player(player), m_socket(nullptr),
       m_reconnect(nullptr), m_debounce(nullptr)
 {
+    m_enabled = QSettings().value(QStringLiteral("discord/enabled"), true).toBool();
     m_appId = effectiveAppId();
     if (m_appId.isEmpty()) {
         // Compiled in but no application ID configured — stay completely idle.
@@ -124,8 +125,31 @@ DiscordPresence::~DiscordPresence()
     }
 }
 
+void DiscordPresence::setEnabled(bool on)
+{
+    if (on == m_enabled)
+        return;
+    m_enabled = on;
+    if (on) {
+        qInfo("[discord] enabled");
+        tryConnect();
+    } else {
+        qInfo("[discord] disabled; clearing status");
+        if (m_reconnect)
+            m_reconnect->stop();
+        if (m_socket && m_socket->state() == QLocalSocket::ConnectedState) {
+            m_ready = false;     // makes pushActivity() send an empty (cleared) status
+            pushActivity();
+            m_socket->flush();
+            m_socket->disconnectFromServer();
+        }
+    }
+}
+
 void DiscordPresence::tryConnect()
 {
+    if (!m_enabled)
+        return;
     if (!m_socket || m_socket->state() != QLocalSocket::UnconnectedState)
         return;
     // A missing socket fails instantly (ENOENT/no pipe), so this loop is cheap when
@@ -184,13 +208,13 @@ void DiscordPresence::onDisconnected()
         qInfo("[discord] disconnected; will retry");
     m_ready = false;
     m_rx.clear();
-    if (m_reconnect)
+    if (m_enabled && m_reconnect)
         m_reconnect->start();
 }
 
 void DiscordPresence::scheduleUpdate()
 {
-    if (m_ready && m_debounce)
+    if (m_enabled && m_ready && m_debounce)
         m_debounce->start();
 }
 

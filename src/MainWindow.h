@@ -132,6 +132,9 @@ private:
     QThread *m_libThread = nullptr;
     Importer *m_importer = nullptr;
     MediaSession *m_session = nullptr;   // OS media-session bridge (null if none)
+#ifdef HAVE_DISCORD_RPC
+    class DiscordPresence *m_discord = nullptr;   // Discord Rich Presence (live toggle)
+#endif
 
     QSplitter *m_splitter;
     QSplitter *m_leftPanel;          // vertical: folder tabs over track info
