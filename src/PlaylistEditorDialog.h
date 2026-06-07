@@ -43,7 +43,8 @@ private:
     void addSelected();        // left selection -> right list
     void removeSelected();     // drop right-list selection
     void deduplicate();        // drop later same-artist+title rows (keep first)
-    void save();
+    void startNewPlaylist();   // reset to a fresh, unnamed playlist (named on save)
+    bool save();               // true if written (false = cancelled/failed)
     void reject() override;    // intercept Close to prompt on unsaved changes
 
     void loadPlaylistIntoRight(const QString &name);

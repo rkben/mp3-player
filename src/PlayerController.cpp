@@ -4,6 +4,77 @@
 
 #include <QThread>
 #include <QRandomGenerator>
+#include <QFileInfo>
+#include <QSet>
+#include <QHash>
+#include <QVector>
+
+namespace {
+// Quality tier from the file extension: lossless > lossy; -1 = not a local file
+// (remote tracks are never grouped/deduped).
+int qualityTier(const Track &t)
+{
+    if (!t.url.isLocalFile())
+        return -1;
+    static const QSet<QString> lossless = {
+        QStringLiteral("flac"), QStringLiteral("wav"),  QStringLiteral("wave"),
+        QStringLiteral("aiff"), QStringLiteral("aif"),  QStringLiteral("alac"),
+        QStringLiteral("ape"),  QStringLiteral("wv"),   QStringLiteral("tta"),
+        QStringLiteral("tak")};
+    const QString ext = QFileInfo(t.url.toLocalFile()).suffix().toLower();
+    return lossless.contains(ext) ? 2 : 1;
+}
+
+// Collapse same artist+title local tracks to the best copy, preserving the first
+// occurrence's position. mode: 0=off, 1=naive (format tier), 2=naive + bitrate
+// tiebreak. If `focus` points at a dropped track it's remapped to the group winner.
+QList<Track> applyPreferHq(const QList<Track> &in, int mode, int *focus = nullptr)
+{
+    if (mode <= 0 || in.size() < 2)
+        return in;
+    QList<Track> out;
+    out.reserve(in.size());
+    QHash<QString, int> slotForKey;        // group key -> position in `out`
+    QVector<int> inToOut(in.size(), -1);   // input index -> output index (focus remap)
+
+    for (int i = 0; i < in.size(); ++i) {
+        const Track &t = in.at(i);
+        const int tier = qualityTier(t);
+        // Ungroupable (remote, or no artist+title): pass through in place.
+        QString key;
+        if (tier > 0 && !(t.artist.trimmed().isEmpty() && t.title.trimmed().isEmpty()))
+            key = t.artist.trimmed().toLower() + QChar(0x1f) + t.title.trimmed().toLower();
+        if (key.isEmpty()) {
+            inToOut[i] = out.size();
+            out.append(t);
+            continue;
+        }
+        const auto it = slotForKey.constFind(key);
+        if (it == slotForKey.constEnd()) {
+            slotForKey.insert(key, out.size());
+            inToOut[i] = out.size();
+            out.append(t);
+        } else {
+            const int pos = it.value();
+            const Track &cur = out.at(pos);
+            const int curTier = qualityTier(cur);
+            bool better;
+            if (tier != curTier)
+                better = tier > curTier;
+            else if (mode >= 2)
+                better = t.bitrate > cur.bitrate;   // Yes: bitrate breaks a tier tie
+            else
+                better = false;                     // Naive: keep first
+            if (better)
+                out[pos] = t;
+            inToOut[i] = pos;   // a dropped duplicate maps to its group's slot
+        }
+    }
+    if (focus && *focus >= 0 && *focus < inToOut.size())
+        *focus = inToOut[*focus];
+    return out;
+}
+}
 
 PlayerController::PlayerController(QObject *parent)
     : QObject(parent)
@@ -117,7 +188,10 @@ void PlayerController::recordHistory(int qindex)
 
 void PlayerController::playQueue(const QList<Track> &tracks, int start)
 {
-    m_queue = tracks;
+    // Prefer-HQ collapses same-song duplicates; remap the start index to the survivor.
+    int focus = start;
+    m_queue = applyPreferHq(tracks, m_preferHq, &focus);
+    start = focus;
     m_history.clear();
     m_historyPos = -1;
     m_consecutiveErrors = 0;
@@ -140,7 +214,7 @@ void PlayerController::enqueue(const QList<Track> &tracks)
 {
     if (tracks.isEmpty())
         return;
-    m_queue.append(tracks);
+    m_queue.append(applyPreferHq(tracks, m_preferHq));   // dedup the appended batch
     emit queueChanged(m_queue);
 }
 
@@ -189,7 +263,7 @@ void PlayerController::play()
     if (m_queue.isEmpty()) {
         if (m_readyQueue.isEmpty())
             return;
-        m_queue = m_readyQueue;
+        m_queue = applyPreferHq(m_readyQueue, m_preferHq);
         emit queueChanged(m_queue);
     }
     playInternal(0);

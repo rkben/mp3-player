@@ -138,8 +138,10 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     // Persist the managed-yt-dlp toggle on OK (download/remove already act on disk).
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        QSettings().setValue(QStringLiteral("ytdlp/useManaged"),
-                             m_ytUseManaged->isChecked());
+        QSettings s;
+        s.setValue(QStringLiteral("ytdlp/useManaged"), m_ytUseManaged->isChecked());
+        s.setValue(QStringLiteral("playback/preferHq"),
+                   m_preferHqCombo->currentData().toInt());
     });
 #ifdef HAVE_DISCORD_RPC
     // Persist the Discord override on OK (this field doesn't round-trip via the host).
@@ -268,6 +270,24 @@ QWidget *SettingsDialog::buildGeneralTab()
     connect(m_audioCombo, &QComboBox::currentIndexChanged, this, [this] {
         emit audioDeviceChanged(m_audioCombo->currentData().toByteArray());
     });
+
+    // Prefer-HQ dedup (No / Naive / Yes), self-contained via QSettings.
+    m_preferHqCombo = new QComboBox;
+    m_preferHqCombo->addItem(tr("No"), 0);
+    m_preferHqCombo->addItem(tr("Naive (lossless over lossy)"), 1);
+    m_preferHqCombo->addItem(tr("Yes (also higher bitrate)"), 2);
+    m_preferHqCombo->setCurrentIndex(
+        QSettings().value(QStringLiteral("playback/preferHq"), 0).toInt());
+    audioForm->addRow(tr("Prefer higher quality:"), m_preferHqCombo);
+    auto *hqHint = new QLabel(tr("When the same song exists in several files, play the "
+                                 "better one — lossless over lossy, then higher bitrate."));
+    hqHint->setWordWrap(true);
+    {
+        QFont f = hqHint->font();
+        f.setPointSize(qMax(1, f.pointSize() - 1));
+        hqHint->setFont(f);
+    }
+    audioForm->addRow(hqHint);
     layout->addWidget(audioBox);
 
     // ---- Import ----

@@ -197,26 +197,21 @@ void PlaylistEditorDialog::onPlaylistActivated(int index)
         rebuildPlaylistCombo(m_currentName);
         return;
     }
+    // No upfront name prompt — start an empty, unnamed playlist; naming happens on
+    // Save (see save()). The combo stays on the "New playlist…" entry.
+    startNewPlaylist();
+}
 
-    const QString name =
-        QInputDialog::getText(this, tr("New Playlist"), tr("Playlist name:")).trimmed();
-    if (name.isEmpty()) {
-        rebuildPlaylistCombo(m_currentName);
-        return;
-    }
-    if (m_store->exists(name)) {
-        loadPlaylistIntoRight(name);   // already exists — edit it rather than clobber
-        rebuildPlaylistCombo(name);
-        return;
-    }
-    // A brand-new, empty playlist: created on Save.
-    m_currentName = name;
+void PlaylistEditorDialog::startNewPlaylist()
+{
+    m_currentName.clear();   // unnamed until saved
     m_comboGuard = true;
     m_rightList->clear();
+    // Show the "New playlist…" entry (last item) as selected, not a real playlist.
+    m_playlistCombo->setCurrentIndex(m_playlistCombo->count() - 1);
     m_comboGuard = false;
     refreshRightFooter();
-    markDirty(true);   // Save persists the (possibly empty) new playlist
-    rebuildPlaylistCombo(name);
+    markDirty(false);
 }
 
 void PlaylistEditorDialog::loadPlaylistIntoRight(const QString &name)
@@ -310,27 +305,38 @@ QList<Track> PlaylistEditorDialog::rightTracks() const
     return out;
 }
 
-void PlaylistEditorDialog::save()
+bool PlaylistEditorDialog::save()
 {
-    if (m_currentName.isEmpty()) {
-        QMessageBox::information(this, tr("Playlist Editor"),
-                                 tr("Choose or create a playlist first."));
-        return;
+    // A new (unnamed) playlist is named here, on save — not when it was started.
+    QString name = m_currentName;
+    if (name.isEmpty()) {
+        name = QInputDialog::getText(this, tr("Save Playlist"), tr("Playlist name:"))
+                   .trimmed();
+        if (name.isEmpty())
+            return false;   // cancelled
+        if (m_store->exists(name)
+            && QMessageBox::question(this, tr("Playlist Editor"),
+                   tr("A playlist named “%1” already exists. Overwrite it?").arg(name))
+                   != QMessageBox::Yes)
+            return false;
     }
+
     QStringList paths;
     const QList<Track> tracks = rightTracks();
     paths.reserve(tracks.size());
     for (const Track &t : tracks)
         paths << storedForm(t.url);
 
-    if (!m_store->write(m_currentName, paths)) {
+    if (!m_store->write(name, paths)) {
         QMessageBox::warning(this, tr("Playlist Editor"),
-                             tr("Could not save “%1”.").arg(m_currentName));
-        return;
+                             tr("Could not save “%1”.").arg(name));
+        return false;
     }
+    m_currentName = name;
     markDirty(false);
     rebuildPlaylistCombo(m_currentName);   // a new playlist now appears in the list
     emit playlistsChanged();
+    return true;
 }
 
 void PlaylistEditorDialog::reject()
@@ -344,15 +350,17 @@ bool PlaylistEditorDialog::confirmDiscardIfDirty()
 {
     if (!m_dirty)
         return true;
+    const QString prompt = m_currentName.isEmpty()
+        ? tr("Save changes to the new playlist?")
+        : tr("Save changes to “%1”?").arg(m_currentName);
     const auto choice = QMessageBox::question(
-        this, tr("Unsaved Changes"),
-        tr("Save changes to “%1”?").arg(m_currentName),
+        this, tr("Unsaved Changes"), prompt,
         QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
     if (choice == QMessageBox::Cancel)
         return false;
     if (choice == QMessageBox::Save)
-        save();
-    return true;
+        return save();   // a cancelled name prompt aborts the switch too
+    return true;         // Discard
 }
 
 void PlaylistEditorDialog::markDirty(bool dirty)

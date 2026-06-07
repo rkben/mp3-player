@@ -137,6 +137,7 @@ void MusicLibrary::createTracksTable()
                 duration INTEGER DEFAULT 0,
                 track_no INTEGER DEFAULT 0,
                 year     INTEGER DEFAULT 0,
+                bitrate  INTEGER DEFAULT 0,
                 art_url  TEXT))");
 }
 
@@ -146,7 +147,7 @@ QList<Track> MusicLibrary::loadAll(QHash<QString, qint64> *mtimesOut)
     QSqlQuery q(m_db);
     q.setForwardOnly(true);
     q.exec("SELECT uri, path, remote, mtime, artist, title, album, duration, "
-           "track_no, art_url, year FROM tracks "
+           "track_no, art_url, year, bitrate FROM tracks "
            "ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, "
            "track_no, title COLLATE NOCASE");
     while (q.next()) {
@@ -162,6 +163,7 @@ QList<Track> MusicLibrary::loadAll(QHash<QString, qint64> *mtimesOut)
         t.trackNo = q.value(8).toInt();
         t.artUrl = q.value(9).toString();
         t.year = q.value(10).toInt();
+        t.bitrate = q.value(11).toInt();
         if (t.title.isEmpty() && !remote)
             t.title = QFileInfo(path).completeBaseName();
         tracks.append(t);
@@ -181,12 +183,12 @@ QSqlQuery MusicLibrary::prepareUpsert()
     // cover; an unchanged mtime keeps the cached art.
     QSqlQuery q(m_db);
     q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
-              "duration, track_no, year) VALUES(?,?,0,?,?,?,?,?,?,?) "
+              "duration, track_no, year, bitrate) VALUES(?,?,0,?,?,?,?,?,?,?,?) "
               "ON CONFLICT(uri) DO UPDATE SET "
               "path=excluded.path, mtime=excluded.mtime, artist=excluded.artist, "
               "title=excluded.title, album=excluded.album, "
               "duration=excluded.duration, track_no=excluded.track_no, "
-              "year=excluded.year, "
+              "year=excluded.year, bitrate=excluded.bitrate, "
               "art_url=CASE WHEN tracks.mtime<>excluded.mtime "
               "THEN NULL ELSE tracks.art_url END");
     return q;
@@ -203,6 +205,7 @@ void MusicLibrary::upsert(QSqlQuery &q, const Track &t, qint64 mtime)
     q.bindValue(6, t.durationMs);
     q.bindValue(7, t.trackNo);
     q.bindValue(8, t.year);
+    q.bindValue(9, t.bitrate);
     if (!q.exec())
         qWarning() << "upsert failed:" << q.lastError().text();
 }
@@ -221,8 +224,10 @@ Track MusicLibrary::parseTags(const QString &path, qint64 /*mtime*/)
             t.trackNo = static_cast<int>(tag->track());
             t.year = static_cast<int>(tag->year());   // TagLib's best guess
         }
-        if (TagLib::AudioProperties *props = f.audioProperties())
+        if (TagLib::AudioProperties *props = f.audioProperties()) {
             t.durationMs = props->lengthInMilliseconds();
+            t.bitrate = props->bitrate();   // kbps; drives Prefer-HQ tiebreaks
+        }
 
         // TagLib's year() is 0 for many formats. Fall back to the first 4-digit
         // run in the raw date properties (handles "2011-03-18", "2011/03", …).
@@ -452,7 +457,7 @@ void MusicLibrary::search(const QString &text, int scope)
 
     // Same column list whichever path we take, so results build identically.
     const char *kCols = "t.uri, t.path, t.remote, t.artist, t.title, t.album, "
-                        "t.duration, t.track_no, t.art_url, t.year";
+                        "t.duration, t.track_no, t.art_url, t.year, t.bitrate";
 
     QSqlQuery q(m_db);
     q.setForwardOnly(true);
@@ -497,6 +502,7 @@ void MusicLibrary::search(const QString &text, int scope)
                 t.trackNo = q.value(7).toInt();
                 t.artUrl = q.value(8).toString();
                 t.year = q.value(9).toInt();
+                t.bitrate = q.value(10).toInt();
                 if (t.title.isEmpty() && !remote)
                     t.title = QFileInfo(path).completeBaseName();
                 results.append(t);

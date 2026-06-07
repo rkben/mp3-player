@@ -81,6 +81,7 @@ private:
     QCheckBox *m_autoPlay;
     QLineEdit *m_ytDlpEdit;
     QComboBox *m_audioCombo;
+    QComboBox *m_preferHqCombo = nullptr;   // self-contained: persists to QSettings
     QPlainTextEdit *m_logView = nullptr;
     YtDlpManager *m_ytdlp = nullptr;
     QCheckBox *m_ytUseManaged = nullptr;

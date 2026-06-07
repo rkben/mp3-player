@@ -75,6 +75,9 @@ public slots:
     void setAudioDevice(const QByteArray &id);
     void setRepeatMode(RepeatMode mode);
     void setShuffle(bool on);
+    // Prefer-HQ dedup mode applied when a set is enqueued: 0=off, 1=naive (format),
+    // 2=naive + bitrate tiebreak. Cached; affects future enqueues only.
+    void setPreferHq(int mode) { m_preferHq = mode; }
     // Update the current track's cover art (resolved asynchronously elsewhere).
     void setCurrentArt(const QUrl &url, const QString &artUrl);
 
@@ -129,6 +132,7 @@ private:
     RepeatMode m_repeat = RepeatMode::None;
     bool m_shuffle = false;
     int m_consecutiveErrors = 0;   // guards against an all-bad queue looping
+    int m_preferHq = 0;            // Prefer-HQ dedup mode (0=off/1=naive/2=bitrate)
     QUrl m_lastErrorUrl;           // dedupe: error + InvalidMedia fire together (by track)
     QUrl m_metaResolvedUrl;        // dedupe: metaDataChanged fires repeatedly (by track)
 };

@@ -15,6 +15,7 @@ struct Track {
     qint64 durationMs = 0;
     int trackNo = 0;
     int year = 0;         // 0 = unknown
+    int bitrate = 0;      // kbps, from TagLib AudioProperties; 0 = unknown/remote
 
     // "Artist — Title" when an artist tag exists, else just the title.
     QString displayText() const {
