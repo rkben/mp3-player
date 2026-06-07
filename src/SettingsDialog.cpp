@@ -17,6 +17,8 @@
 #include <QGroupBox>
 #include <QSettings>
 #include <QMessageBox>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QPlainTextEdit>
@@ -377,6 +379,12 @@ QWidget *SettingsDialog::buildLogTab()
             });
 
     auto *btnRow = new QHBoxLayout;
+    auto *openBtn = new QPushButton(tr("Open log file"));
+    openBtn->setMinimumHeight(34);
+    openBtn->setToolTip(Logger::logFilePath());
+    connect(openBtn, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(Logger::logFilePath()));
+    });
     auto *copyBtn = new QPushButton(tr("Copy"));
     copyBtn->setMinimumHeight(34);
     connect(copyBtn, &QPushButton::clicked, this,
@@ -386,6 +394,7 @@ QWidget *SettingsDialog::buildLogTab()
     clearBtn->setMinimumHeight(34);
     connect(clearBtn, &QPushButton::clicked, this,
             [this] { Logger::instance()->clear(); m_logView->clear(); });
+    btnRow->addWidget(openBtn);
     btnRow->addStretch();
     btnRow->addWidget(copyBtn);
     btnRow->addWidget(clearBtn);

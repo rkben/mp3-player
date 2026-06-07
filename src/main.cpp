@@ -32,6 +32,21 @@ int main(int argc, char *argv[])
     Theme::apply(mode, s.value("ui/themeFile").toString());
     Theme::logPlatformTheme(mode);
 
+    const char *mprisFlag =
+#ifdef HAVE_MPRIS
+        "on";
+#else
+        "off";
+#endif
+    const char *discordFlag =
+#ifdef HAVE_DISCORD_RPC
+        "on";
+#else
+        "off";
+#endif
+    qInfo("[app] Pocket Player starting — Qt %s, MPRIS %s, Discord RPC %s",
+          qVersion(), mprisFlag, discordFlag);
+
     MainWindow w;
     w.show();
     return app.exec();

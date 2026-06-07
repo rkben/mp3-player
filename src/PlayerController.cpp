@@ -90,6 +90,9 @@ void PlayerController::playInternal(int qindex)
     m_position = 0;
     m_current = m_queue.at(qindex);   // the source of truth for "what's playing"
     const Track &t = m_current;
+    qInfo().noquote() << QStringLiteral("[play] %1%2")
+                             .arg(t.displayText(),
+                                  t.isRemote() ? QStringLiteral(" (remote)") : QString());
     if (t.isRemote())
         m_resolver->resolve(t.url);   // engineLoad fires once the stream resolves
     else
@@ -353,6 +356,8 @@ void PlayerController::skipBadTrack(const QString &message)
         return;
     m_lastErrorUrl = m_current.url;
 
+    qWarning().noquote() << QStringLiteral("[play] skipping '%1' — %2")
+                                .arg(m_current.title, message);
     emit trackError(m_current.title, message);
 
     // Bail out if everything is failing, so we don't spin through a dead queue.

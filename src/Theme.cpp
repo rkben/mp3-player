@@ -207,10 +207,10 @@ void logPlatformTheme(Mode mode)
         verdict = kdeNative ? QStringLiteral(" -> KDE platform theme active")
                             : QStringLiteral(" -> non-KDE style (plasma-integration missing?)");
 
-    // qInfo() is suppressed in this Release build, so log to stderr directly.
-    fprintf(stderr,
-            "Theme: mode=%s style=%s platform=%s iconTheme=%s | "
-            "QT_QPA_PLATFORMTHEME=%s XDG_CURRENT_DESKTOP=%s%s\n",
+    // Route through qInfo so it lands in the in-app Log too (the message handler
+    // chains to stderr, so console output is preserved).
+    qInfo("[theme] mode=%s style=%s platform=%s iconTheme=%s | "
+          "QT_QPA_PLATFORMTHEME=%s XDG_CURRENT_DESKTOP=%s%s",
             qPrintable(modeToString(mode)),
             qPrintable(style),
             qPrintable(qApp->platformName()),

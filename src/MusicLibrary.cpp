@@ -320,6 +320,8 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
     }
     m_db.commit();
 
+    qInfo("[import] stored %lld remote track(s) in the library",
+          static_cast<long long>(tracks.size()));
     emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
 }
 
@@ -527,6 +529,9 @@ void MusicLibrary::scan(const QStringList &folders)
     if (!ensureDb())
         return;
 
+    qInfo("[scan] starting — %lld folder(s)",
+          static_cast<long long>(folders.size()));
+
     // Timing instrumentation (PP_SCAN_BENCH): works on real disk scans, not just
     // the synthetic benchmark. Lets you tune scan/threads against a live library.
     const bool bench = qEnvironmentVariableIsSet("PP_SCAN_BENCH");
@@ -667,6 +672,11 @@ void MusicLibrary::scan(const QStringList &folders)
     if (changed)
         emit libraryLoaded(loadAll(nullptr));
 
+    // Always log a one-line summary (the in-app Log + stderr); the bench env var
+    // adds the finer load/walk timing breakdown for tuning.
+    qInfo("[scan] done — %d on disk (%s), parsed %d, pruned %d, %lld ms",
+          onDisk, cold ? "cold" : "warm", total, pruned,
+          static_cast<long long>(scanTimer.elapsed()));
     if (bench) {
         fprintf(stderr, "[scan] total %lld ms — %d on disk (%s), "
                         "load %lld ms, walk %lld ms, parsed %d, pruned %d\n",

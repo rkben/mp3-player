@@ -43,6 +43,7 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
         return;
     }
 
+    qInfo().noquote() << QStringLiteral("[resolve] %1").arg(pageUrl.toString());
     cancelCurrent();   // a newer request supersedes any still-running resolve
 
     auto *proc = new QProcess(this);
@@ -74,6 +75,9 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
                         msg = err.isEmpty()
                                   ? tr("yt-dlp failed to resolve the stream")
                                   : err;
+                    qWarning().noquote()
+                        << QStringLiteral("[resolve] failed %1 — %2")
+                               .arg(pageUrl.toString(), msg);
                     emit failed(pageUrl, msg);
                     return;
                 }
@@ -82,10 +86,15 @@ void RemoteResolver::resolve(const QUrl &pageUrl)
                 for (const QByteArray &line : out.split('\n')) {
                     const QString s = QString::fromUtf8(line).trimmed();
                     if (!s.isEmpty()) {
+                        qInfo().noquote()
+                            << QStringLiteral("[resolve] ok %1").arg(pageUrl.toString());
                         emit resolved(pageUrl, QUrl(s));
                         return;
                     }
                 }
+                qWarning().noquote()
+                    << QStringLiteral("[resolve] failed %1 — no stream URL")
+                           .arg(pageUrl.toString());
                 emit failed(pageUrl, tr("yt-dlp returned no stream URL"));
             });
     connect(proc, &QProcess::errorOccurred, this,

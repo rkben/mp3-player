@@ -997,6 +997,7 @@ void MainWindow::resetApplication()
 {
     // Clean slate: erase every bit of persisted state, then quit so the next launch
     // starts fresh. Confirmation already happened in the dialog.
+    qInfo("[reset] erasing library, playlists, art and settings; quitting");
     m_resetting = true;   // suppress the save-on-quit handlers (see saveUiState /
                           // flushQueueCache) so they don't recreate what we delete
 

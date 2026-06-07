@@ -141,6 +141,7 @@ void DiscordPresence::tryConnect()
 
 void DiscordPresence::onConnected()
 {
+    qInfo("[discord] IPC connected; handshaking");
     m_ready = false;
     m_rx.clear();
     QJsonObject hello{{QStringLiteral("v"), 1}, {QStringLiteral("client_id"), m_appId}};
@@ -169,6 +170,7 @@ void DiscordPresence::onReadyRead()
             // push activity.
             const QJsonObject o = QJsonDocument::fromJson(payload).object();
             if (o.value(QStringLiteral("evt")).toString() == QLatin1String("READY")) {
+                qInfo("[discord] ready; pushing presence");
                 m_ready = true;
                 pushActivity();
             }
@@ -178,6 +180,8 @@ void DiscordPresence::onReadyRead()
 
 void DiscordPresence::onDisconnected()
 {
+    if (m_ready)   // only note real drops, not the quiet connect-attempt failures
+        qInfo("[discord] disconnected; will retry");
     m_ready = false;
     m_rx.clear();
     if (m_reconnect)

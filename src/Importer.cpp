@@ -95,6 +95,7 @@ void Importer::start(const QString &url, bool createPlaylist,
     m_createPlaylist = createPlaylist;
     m_appendPlaylist = appendPlaylist;
 
+    qInfo().noquote() << QStringLiteral("[import] start %1").arg(url);
     emit status(tr("Importing… %1").arg(url));
 
     m_proc = new QProcess(this);
@@ -215,8 +216,10 @@ void Importer::onProcessFinished()
         toast << tr("%n track(s) skipped — DRM-protected (e.g. SoundCloud Go+)",
                     nullptr, errs.drmCount);
     toast += errs.others;
-    if (!toast.isEmpty())
+    if (!toast.isEmpty()) {
+        qWarning().noquote() << QStringLiteral("[import] %1").arg(toast.join(QLatin1String("; ")));
         emit trackFailed(toast.join('\n'));
+    }
 
     if (m_tracks.isEmpty()) {
         QString why;
@@ -227,6 +230,7 @@ void Importer::onProcessFinished()
         else
             why = errText.isEmpty() ? tr("yt-dlp returned nothing")
                                     : errText.section('\n', 0, 0);
+        qWarning().noquote() << QStringLiteral("[import] failed — %1").arg(why);
         reset();
         emit failed(why);
         return;
@@ -300,6 +304,10 @@ void Importer::finalize()
     if (m_createPlaylist)
         createName = m_playlistTitle.isEmpty() ? tr("Imported") : m_playlistTitle;
     const QString append = m_appendPlaylist;
+    qInfo("[import] finished — %lld track(s)%s",
+          static_cast<long long>(tracks.size()),
+          createName.isEmpty() ? "" : qPrintable(QStringLiteral(" -> new playlist '%1'")
+                                                      .arg(createName)));
     reset();
     emit status(QString());   // clear the status bar
     emit finished(tracks, createName, append);
