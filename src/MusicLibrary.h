@@ -71,6 +71,10 @@ signals:
 private:
     bool ensureDb();
     void createTracksTable();   // uri-keyed schema
+    void createFtsSchema();     // FTS5 index + sync triggers (shared with rebuild)
+    void rebuildSchema(int fromVersion);          // drop + recreate, salvaging remotes
+    QList<Track> salvageRemoteRows();             // read remote rows before a rebuild
+    void insertRemoteRows(const QList<Track> &t); // remote upsert, no libraryLoaded emit
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
     QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
     void flushPendingImports();   // drain imports deferred during a scan

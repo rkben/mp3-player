@@ -2,6 +2,7 @@
 
 #include <QSqlQuery>
 #include <QSqlError>
+#include <QSqlRecord>
 #include <QStandardPaths>
 #include <QDir>
 #include <QDirIterator>
@@ -30,6 +31,9 @@
 #include <taglib/tpropertymap.h>
 
 namespace {
+// Bump on any `tracks` schema change. A DB whose PRAGMA user_version differs is
+// rebuilt on open (remote rows salvaged, local rows re-derived by the folder scan).
+constexpr int kSchemaVersion = 1;
 constexpr int kCommitEvery = 1000;   // rows per transaction batch
 constexpr int kAppendBatch = 200;    // tracks per progressive UI append
 constexpr int kPumpEvery = 250;      // event-pump cadence (keep coarse: cheap GUI breathing room)
@@ -91,11 +95,28 @@ bool MusicLibrary::ensureDb()
     q.exec("PRAGMA journal_mode=WAL");
     q.exec("PRAGMA synchronous=NORMAL");
 
-    // Identity is the `uri` (url string) so a track may be local or remote.
-    createTracksTable();
+    // Schema versioning: a DB whose version differs from kSchemaVersion is rebuilt
+    // (remote rows salvaged). Existing DBs predate this and read 0, so they rebuild
+    // once on upgrade. Identity is the `uri` so a track may be local or remote.
+    QSqlQuery pv(m_db);
+    const int version = pv.exec("PRAGMA user_version") && pv.next()
+                            ? pv.value(0).toInt() : 0;
+    if (version != kSchemaVersion) {
+        rebuildSchema(version);
+    } else {
+        createTracksTable();
+        createFtsSchema();
+    }
 
-    // Full-text index over title/artist/album, external-content (no data dup),
-    // kept in sync with `tracks` via triggers. Built (and back-filled) once.
+    m_opened = true;
+    return true;
+}
+
+void MusicLibrary::createFtsSchema()
+{
+    // Full-text index over title/artist/album, external-content (no data dup), kept
+    // in sync with `tracks` via triggers. Back-filled once when first created.
+    QSqlQuery q(m_db);
     QSqlQuery ftsCheck(m_db);
     ftsCheck.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks_fts'");
     const bool ftsExists = ftsCheck.next();
@@ -115,9 +136,65 @@ bool MusicLibrary::ensureDb()
            "VALUES(new.rowid, new.title, new.artist, new.album); END");
     if (!ftsExists)   // back-fill from any pre-existing rows
         q.exec("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')");
+}
 
-    m_opened = true;
-    return true;
+void MusicLibrary::rebuildSchema(int fromVersion)
+{
+    // Local rows are re-derivable from the folder scan; remote rows are not, so save
+    // them across the drop and re-insert afterwards.
+    const QList<Track> remotes = salvageRemoteRows();
+
+    QSqlQuery q(m_db);
+    q.exec("DROP TRIGGER IF EXISTS tracks_ai");
+    q.exec("DROP TRIGGER IF EXISTS tracks_ad");
+    q.exec("DROP TRIGGER IF EXISTS tracks_au");
+    q.exec("DROP TABLE IF EXISTS tracks_fts");
+    q.exec("DROP TABLE IF EXISTS tracks");
+
+    createTracksTable();
+    createFtsSchema();   // triggers exist before the reinsert, so FTS stays populated
+    if (!remotes.isEmpty())
+        insertRemoteRows(remotes);
+
+    q.exec(QStringLiteral("PRAGMA user_version=%1").arg(kSchemaVersion));
+    qInfo("[db] schema v%d -> v%d; salvaged %d remote row(s)",
+          fromVersion, kSchemaVersion, int(remotes.size()));
+}
+
+QList<Track> MusicLibrary::salvageRemoteRows()
+{
+    QList<Track> out;
+    QSqlQuery check(m_db);
+    check.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks'");
+    if (!check.next())
+        return out;   // fresh DB: nothing to salvage
+
+    QSqlQuery q(m_db);
+    q.setForwardOnly(true);
+    // SELECT * + read by column name so any prior schema works (missing columns
+    // simply default).
+    if (!q.exec("SELECT * FROM tracks WHERE remote=1")) {
+        qWarning() << "[db] salvage failed:" << q.lastError().text();
+        return out;
+    }
+    while (q.next()) {
+        const QSqlRecord r = q.record();
+        auto val = [&r](const char *name) -> QVariant {
+            const int i = r.indexOf(QLatin1String(name));
+            return i >= 0 ? r.value(i) : QVariant();
+        };
+        Track t;
+        t.url = QUrl(val("uri").toString());
+        t.artist = val("artist").toString();
+        t.title = val("title").toString();
+        t.album = val("album").toString();
+        t.durationMs = val("duration").toLongLong();
+        t.trackNo = val("track_no").toInt();
+        t.year = val("year").toInt();
+        t.artUrl = val("art_url").toString();
+        out.append(t);
+    }
+    return out;
 }
 
 void MusicLibrary::createTracksTable()
@@ -301,6 +378,14 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
     if (!ensureDb())
         return;
 
+    insertRemoteRows(tracks);
+    qInfo("[import] stored %lld remote track(s) in the library",
+          static_cast<long long>(tracks.size()));
+    emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
+}
+
+void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
+{
     m_db.transaction();
     QSqlQuery q(m_db);
     q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
@@ -321,13 +406,9 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
         q.addBindValue(t.year);
         q.addBindValue(t.artUrl);
         if (!q.exec())
-            qWarning() << "importTracks row failed:" << q.lastError().text();
+            qWarning() << "insert remote row failed:" << q.lastError().text();
     }
     m_db.commit();
-
-    qInfo("[import] stored %lld remote track(s) in the library",
-          static_cast<long long>(tracks.size()));
-    emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
 }
 
 void MusicLibrary::flushPendingImports()
