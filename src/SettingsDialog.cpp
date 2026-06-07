@@ -206,6 +206,18 @@ QWidget *SettingsDialog::buildGeneralTab()
     auto *importForm = new QFormLayout(importBox);
     importForm->setSpacing(8);
     importForm->addRow(tr("yt-dlp path:"), m_ytDlpEdit);
+    // Curated list of sources known to map cleanly (anything yt-dlp supports still
+    // imports generically — this is guidance, not a gate). Extend as sources are
+    // tuned in Importer::parseLine. A full-width hint under the path: a word-wrap
+    // label in a form's field column mis-sizes when the dialog is wide, so span both
+    // columns and style it like the other small hints rather than a disabled field.
+    auto *sources = new QLabel(tr("Supported sources: %1").arg(QStringLiteral(
+        "YouTube, SoundCloud, Bandcamp, Mixcloud, HearThis.at, ReverbNation")));
+    sources->setWordWrap(true);
+    QFont hintFont = sources->font();
+    hintFont.setPointSize(qMax(1, hintFont.pointSize() - 1));
+    sources->setFont(hintFont);
+    importForm->addRow(sources);   // single-widget row spans the full groupbox width
     layout->addWidget(importBox);
 
     layout->addStretch();

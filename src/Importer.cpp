@@ -28,6 +28,25 @@ QString firstOf(const QJsonObject &o, std::initializer_list<const char *> keys)
     return {};
 }
 
+// Sources that need bespoke field mapping; everything else is Generic. Detected by
+// page-URL host or yt-dlp's extractor_key (the host check alone misses CDN/redirect
+// URLs, the key alone misses mirrors — either is sufficient).
+enum class Source { Generic, Youtube, Mixcloud, HearThis, ReverbNation };
+
+Source detectSource(const QString &page, const QString &extractorKey)
+{
+    auto has = [&](const char *host, const char *key) {
+        return page.contains(QLatin1String(host), Qt::CaseInsensitive)
+            || extractorKey.startsWith(QLatin1String(key), Qt::CaseInsensitive);
+    };
+    if (has("youtube.com", "Youtube") || page.contains(QLatin1String("youtu.be")))
+        return Source::Youtube;
+    if (has("mixcloud.com", "Mixcloud"))       return Source::Mixcloud;
+    if (has("hearthis.at", "HearThis"))        return Source::HearThis;
+    if (has("reverbnation.com", "ReverbNation")) return Source::ReverbNation;
+    return Source::Generic;
+}
+
 // yt-dlp emits no JSON for a DRM-protected entry, only one
 // "ERROR: [soundcloud] <id>: This video is DRM protected" line on stderr (one per
 // track, even inside an album/playlist run). Split stderr into a DRM-protected
@@ -118,16 +137,29 @@ void Importer::parseLine(const QByteArray &line)
     // keep the per-entry direct media URL to disambiguate identities below.
     m_directUrls.append(o.value(QLatin1String("url")).toString());
 
-    // YouTube's `uploader`/`channel` is the channel, not the performer — only its
-    // `artist` field (present on music tracks) is meaningful. Use it when present,
-    // otherwise leave the artist unset (stored NULL). Other sources keep the
-    // uploader/channel/creator fallback chain.
-    const bool isYoutube = page.contains(QLatin1String("youtube.com"))
-        || page.contains(QLatin1String("youtu.be"))
-        || o.value(QLatin1String("extractor_key")).toString()
-               .startsWith(QLatin1String("Youtube"), Qt::CaseInsensitive);
-    t.artist = isYoutube ? o.value(QLatin1String("artist")).toString().trimmed()
-                         : firstOf(o, {"artist", "uploader", "channel", "creator"});
+    // Artist mapping is per-source (see notes/new_remote_sources.md):
+    //  - YouTube: `uploader`/`channel` is the channel, not the performer — only the
+    //    `artist` field (present on music tracks) is meaningful; else leave unset.
+    //  - Mixcloud/ReverbNation: the uploader *is* the artist (DJ sets / the song's
+    //    artist page); Mixcloud's own `artist` tag is redundant, so prefer uploader.
+    //  - HearThis: no reliable artist/uploader — leave unset rather than guess.
+    //  - Generic: the uploader/channel/creator fallback chain.
+    const QString extractorKey = o.value(QLatin1String("extractor_key")).toString();
+    switch (detectSource(page, extractorKey)) {
+    case Source::Youtube:
+        t.artist = o.value(QLatin1String("artist")).toString().trimmed();
+        break;
+    case Source::Mixcloud:
+    case Source::ReverbNation:
+        t.artist = firstOf(o, {"uploader", "artist"});
+        break;
+    case Source::HearThis:
+        t.artist.clear();
+        break;
+    case Source::Generic:
+        t.artist = firstOf(o, {"artist", "uploader", "channel", "creator"});
+        break;
+    }
     t.album = firstOf(o, {"album", "playlist", "playlist_title"});
     if (t.album.isEmpty())
         t.album = QStringLiteral("_unknown");

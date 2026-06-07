@@ -8,6 +8,7 @@ class QPushButton;
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QPlainTextEdit;
 class QDialogButtonBox;
 class QProcess;
 
@@ -33,6 +34,7 @@ private:
     QLineEdit *m_url;
     QPushButton *m_check;
     QLabel *m_info;
+    QPlainTextEdit *m_errorView;   // full yt-dlp stderr on failure; hidden otherwise
     QCheckBox *m_create;
     QComboBox *m_append;
     QDialogButtonBox *m_buttons;

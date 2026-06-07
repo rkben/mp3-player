@@ -10,6 +10,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
+#include <QPlainTextEdit>
+#include <QFontDatabase>
 #include <QGroupBox>
 #include <QDialogButtonBox>
 #include <QProcess>
@@ -36,6 +38,16 @@ ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
     m_info = new QLabel(tr("Check a URL to see what it contains."));
     m_info->setWordWrap(true);
     root->addWidget(m_info);
+
+    // Full yt-dlp stderr on a failed check — monospace + wrapped + read-only, hidden
+    // until there's something to show so the dialog stays compact in the happy path.
+    m_errorView = new QPlainTextEdit;
+    m_errorView->setReadOnly(true);
+    m_errorView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_errorView->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    m_errorView->setMinimumHeight(120);
+    m_errorView->hide();
+    root->addWidget(m_errorView);
 
     // Playlist options — disabled until a check finds multiple tracks.
     auto *plBox = new QGroupBox(tr("Playlist"));
@@ -109,11 +121,19 @@ void ImportDialog::runCheck()
         m_check->setEnabled(true);
 
         if (code != 0 && count == 0) {
-            m_info->setText(err.isEmpty() ? tr("Couldn't read that URL.")
-                                          : err.section('\n', -1));
+            // Short reason in the label; the full yt-dlp output in the error box.
+            m_info->setText(tr("Couldn't read that URL."));
+            if (err.isEmpty()) {
+                m_errorView->hide();
+            } else {
+                m_errorView->setPlainText(err);
+                m_errorView->show();
+            }
             m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
             return;
         }
+        m_errorView->clear();
+        m_errorView->hide();
         if (count > 1) {
             m_info->setText(tr("Found %n track(s).", nullptr, count));
             setPlaylistOptionsEnabled(true);
