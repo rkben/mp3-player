@@ -14,6 +14,7 @@
 #include "Importer.h"
 #include "ImportDialog.h"
 #include "PlaylistEditorDialog.h"
+#include "YtDlpManager.h"
 #include "TrackListModel.h"   // totalDurationMs()
 
 #ifdef HAVE_DISCORD_RPC
@@ -199,6 +200,18 @@ MainWindow::MainWindow(QWidget *parent)
     // the Settings enable toggle can flip it live.
     m_discord = new DiscordPresence(m_controller, this);
 #endif
+
+    // Managed yt-dlp: on startup, if enabled, check GitHub for a newer release and
+    // notify (no auto-download). The binary lives under AppData (removed on reset).
+    m_ytdlp = new YtDlpManager(this);
+    connect(m_ytdlp, &YtDlpManager::latestVersion, this,
+            [](const QString &tag, bool updateAvailable) {
+                if (updateAvailable && YtDlpManager::isManagedInstalled())
+                    ToastArea::post(
+                        tr("yt-dlp update available (%1) — update in Settings").arg(tag));
+            });
+    if (QSettings().value("ytdlp/useManaged", true).toBool())
+        m_ytdlp->checkLatest();
 
     startLibraryThread();
     restoreSettings();
@@ -940,14 +953,16 @@ void MainWindow::openSettings(bool startOnLibrary)
     const bool curAutoSync = s.value("library/autoSync", false).toBool();
     const bool curRestoreQueue = s.value("ui/restoreQueue", true).toBool();
     const bool curAutoPlay = s.value("ui/autoPlay", false).toBool();
-    const QString curYtDlp = RemoteResolver::ytDlpPath();   // configured, else $PATH
+    // The explicit override only (empty = use managed/$PATH); showing the *resolved*
+    // path here would let OK pin it and defeat the managed toggle.
+    const QString curYtDlp = s.value("ytdlp/path").toString();
     const QByteArray curAudioDev = s.value("audio/outputDevice").toByteArray();
     const Theme::Mode curTheme =
         Theme::modeFromString(s.value("ui/theme", "system").toString());
     const QString curThemeFile = s.value("ui/themeFile").toString();
 
     SettingsDialog dlg(m_folders, curAutoSync, curRestoreQueue, curAutoPlay,
-                       curYtDlp, curAudioDev, curTheme, curThemeFile, this);
+                       curYtDlp, curAudioDev, curTheme, curThemeFile, m_ytdlp, this);
     if (startOnLibrary)
         dlg.selectLibraryTab();   // "Add Directory" lands the user on the folders
 

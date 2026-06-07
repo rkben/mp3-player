@@ -1,5 +1,6 @@
 #include "RemoteResolver.h"
 #include "ProcUtil.h"
+#include "YtDlpManager.h"
 
 #include <QProcess>
 #include <QSettings>
@@ -11,9 +12,16 @@
 
 QString RemoteResolver::ytDlpPath()
 {
+    // 1. Explicit override (advanced Settings field) always wins.
     const QString configured = QSettings().value("ytdlp/path").toString();
     if (!configured.isEmpty())
         return configured;
+
+    // 2. The app-managed binary, when enabled and installed. Lives under AppData so a
+    //    full reset removes it; the "Use managed" toggle lets the user prefer $PATH.
+    if (QSettings().value("ytdlp/useManaged", true).toBool()
+        && YtDlpManager::isManagedInstalled())
+        return YtDlpManager::managedPath();
 
     const QString onPath = QStandardPaths::findExecutable(QStringLiteral("yt-dlp"));
     if (!onPath.isEmpty())

@@ -24,8 +24,17 @@ ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
     setWindowTitle(tr("Import from URL"));
     setModal(true);
     setMinimumWidth(460);
+    resize(460, 340);   // a touch taller by default; still grows with the error box
 
     auto *root = new QVBoxLayout(this);
+
+    // Shown only when no yt-dlp is available (managed off + not on PATH); the input
+    // and Check are disabled in that case (set up at the end of the constructor).
+    m_needYtDlp = new QLabel(tr("yt-dlp is required to import. Enable managed yt-dlp "
+                                "in Settings, or install it on your PATH."));
+    m_needYtDlp->setWordWrap(true);
+    m_needYtDlp->hide();
+    root->addWidget(m_needYtDlp);
 
     // URL + inline Check.
     auto *urlRow = new QHBoxLayout;
@@ -83,6 +92,14 @@ ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
 
     setPlaylistOptionsEnabled(false);
     m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);   // require a check first
+
+    // Without yt-dlp there's nothing to import: warn up top and disable the input.
+    if (RemoteResolver::ytDlpPath().isEmpty()) {
+        m_needYtDlp->show();
+        m_url->setEnabled(false);
+        m_check->setEnabled(false);
+        m_info->hide();
+    }
 }
 
 void ImportDialog::setPlaylistOptionsEnabled(bool on)

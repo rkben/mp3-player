@@ -13,6 +13,8 @@ class QTableWidget;
 class QPlainTextEdit;
 class QTabWidget;
 class QWidget;
+class QLabel;
+class YtDlpManager;
 
 // Tabbed modal settings dialog. General tab holds appearance (theme); Library
 // tab holds the labelled music folders, a manual Sync button, and an Auto Sync
@@ -25,7 +27,7 @@ public:
     SettingsDialog(QList<LibraryFolder> folders, bool autoSync, bool restoreQueue,
                    bool autoPlay, QString ytDlpPath, QByteArray audioDeviceId,
                    Theme::Mode themeMode, QString themeFile,
-                   QWidget *parent = nullptr);
+                   YtDlpManager *ytdlp, QWidget *parent = nullptr);
 
     QList<LibraryFolder> folders() const;   // labels default to the dir name
     bool autoSync() const;
@@ -62,6 +64,7 @@ private slots:
 
 private:
     void onThemeRowChanged();
+    void refreshYtStatus(const QString &override = QString());   // override = transient text
     QWidget *buildGeneralTab();
     QWidget *buildLibraryTab(bool autoSync);
     QWidget *buildLogTab();
@@ -79,6 +82,11 @@ private:
     QLineEdit *m_ytDlpEdit;
     QComboBox *m_audioCombo;
     QPlainTextEdit *m_logView = nullptr;
+    YtDlpManager *m_ytdlp = nullptr;
+    QCheckBox *m_ytUseManaged = nullptr;
+    QLabel *m_ytStatus = nullptr;
+    QPushButton *m_ytDownload = nullptr;
+    QPushButton *m_ytRemove = nullptr;
     QTabWidget *m_tabs = nullptr;
     QWidget *m_libraryPage = nullptr;   // the Library tab's scroll page, for selection
     bool m_resetRequested = false;

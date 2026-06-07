@@ -33,6 +33,7 @@ private:
 
     QLineEdit *m_url;
     QPushButton *m_check;
+    QLabel *m_needYtDlp;   // shown + input disabled when no yt-dlp is available
     QLabel *m_info;
     QPlainTextEdit *m_errorView;   // full yt-dlp stderr on failure; hidden otherwise
     QCheckBox *m_create;

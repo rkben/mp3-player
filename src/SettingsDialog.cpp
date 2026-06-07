@@ -29,12 +29,14 @@
 #include <QMediaDevices>
 #include <QAudioDevice>
 
+#include "YtDlpManager.h"
+
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
                                bool restoreQueue, bool autoPlay,
                                QString ytDlpPath, QByteArray audioDeviceId,
                                Theme::Mode themeMode, QString themeFile,
-                               QWidget *parent)
-    : QDialog(parent)
+                               YtDlpManager *ytdlp, QWidget *parent)
+    : QDialog(parent), m_ytdlp(ytdlp)
 {
     setWindowTitle(tr("Settings"));
     setModal(true);
@@ -134,6 +136,11 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    // Persist the managed-yt-dlp toggle on OK (download/remove already act on disk).
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        QSettings().setValue(QStringLiteral("ytdlp/useManaged"),
+                             m_ytUseManaged->isChecked());
+    });
 #ifdef HAVE_DISCORD_RPC
     // Persist the Discord override on OK (this field doesn't round-trip via the host).
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
@@ -169,6 +176,30 @@ void SettingsDialog::selectLibraryTab()
 {
     if (m_tabs && m_libraryPage)
         m_tabs->setCurrentWidget(m_libraryPage);
+}
+
+void SettingsDialog::refreshYtStatus(const QString &override)
+{
+    if (!m_ytStatus)
+        return;
+    const bool installed = YtDlpManager::isManagedInstalled();
+    const QString ver = YtDlpManager::installedVersion();
+    const bool unsupported = YtDlpManager::assetName().isEmpty();
+
+    if (!override.isEmpty())
+        m_ytStatus->setText(override);
+    else if (unsupported)
+        m_ytStatus->setText(tr("Not available for this platform."));
+    else if (installed)
+        m_ytStatus->setText(ver.isEmpty() ? tr("Installed.")
+                                          : tr("Installed: %1").arg(ver));
+    else
+        m_ytStatus->setText(tr("Not installed."));
+
+    m_ytDownload->setText(installed ? tr("Update") : tr("Download"));
+    const bool busy = m_ytdlp && m_ytdlp->busy();
+    m_ytDownload->setEnabled(!unsupported && m_ytdlp && !busy);
+    m_ytRemove->setEnabled(installed && !busy);
 }
 
 bool SettingsDialog::restoreQueue() const
@@ -243,10 +274,73 @@ QWidget *SettingsDialog::buildGeneralTab()
     auto *importBox = new QGroupBox(tr("Import"));
     auto *importForm = new QFormLayout(importBox);
     importForm->setSpacing(8);
-    // yt-dlp path + Reset (clears the override so ytDlpPath() re-probes $PATH).
+
+    // --- Managed yt-dlp (download + auto-update from GitHub releases) ---
+    m_ytUseManaged = new QCheckBox(tr("Use managed yt-dlp"));
+    m_ytUseManaged->setChecked(
+        QSettings().value(QStringLiteral("ytdlp/useManaged"), true).toBool());
+    importForm->addRow(m_ytUseManaged);
+    auto *ytManagedHint = new QLabel(tr("Download and keep yt-dlp updated "
+        "automatically instead of using the copy on your system PATH."));
+    ytManagedHint->setWordWrap(true);
+    {
+        QFont f = ytManagedHint->font();
+        f.setPointSize(qMax(1, f.pointSize() - 1));
+        ytManagedHint->setFont(f);
+    }
+    importForm->addRow(ytManagedHint);
+
+    m_ytStatus = new QLabel;
+    importForm->addRow(tr("Managed:"), m_ytStatus);
+
+    auto *ytBtns = new QHBoxLayout;
+    m_ytDownload = new QPushButton;   // label set by refreshYtStatus (Download/Update)
+    m_ytRemove = new QPushButton(tr("Remove"));
+    m_ytRemove->setToolTip(tr("Delete the managed binary and use the system PATH copy."));
+    ytBtns->addWidget(m_ytDownload);
+    ytBtns->addWidget(m_ytRemove);
+    ytBtns->addStretch(1);
+    importForm->addRow(ytBtns);
+
+    if (m_ytdlp) {
+        connect(m_ytUseManaged, &QCheckBox::toggled, this, [this] { refreshYtStatus(); });
+        connect(m_ytDownload, &QPushButton::clicked, this, [this] {
+            m_ytDownload->setEnabled(false);
+            m_ytRemove->setEnabled(false);
+            m_ytdlp->downloadLatest();
+        });
+        connect(m_ytRemove, &QPushButton::clicked, this, [this] {
+            m_ytdlp->remove();
+            refreshYtStatus();
+        });
+        connect(m_ytdlp, &YtDlpManager::downloadProgress, this,
+                [this](qint64 rec, qint64 total) {
+                    refreshYtStatus(total > 0
+                        ? tr("Downloading… %1%").arg(rec * 100 / total)
+                        : tr("Downloading…"));
+                });
+        connect(m_ytdlp, &YtDlpManager::installed, this, [this] { refreshYtStatus(); });
+        connect(m_ytdlp, &YtDlpManager::removed, this, [this] { refreshYtStatus(); });
+        connect(m_ytdlp, &YtDlpManager::failed, this,
+                [this](const QString &m) { refreshYtStatus(tr("Error: %1").arg(m)); });
+        connect(m_ytdlp, &YtDlpManager::latestVersion, this,
+                [this](const QString &tag, bool upd) {
+                    refreshYtStatus(upd ? tr("Latest: %1 (update available)").arg(tag)
+                                        : tr("Up to date (%1)").arg(tag));
+                });
+        m_ytdlp->checkLatest();   // refresh availability when the dialog opens
+    } else {
+        m_ytUseManaged->setEnabled(false);
+        m_ytDownload->setEnabled(false);
+        m_ytRemove->setEnabled(false);
+    }
+    refreshYtStatus();
+
+    // yt-dlp path + Reset. Reset only clears this explicit override (falls back to the
+    // managed binary if enabled, else $PATH) — it never deletes the managed binary.
     auto *ytRow = new QHBoxLayout;
     auto *ytReset = new QPushButton(tr("Reset"));
-    ytReset->setToolTip(tr("Clear the override and use the yt-dlp found on $PATH."));
+    ytReset->setToolTip(tr("Clear this override (use managed yt-dlp or $PATH)."));
     connect(ytReset, &QPushButton::clicked, this, [this] { m_ytDlpEdit->clear(); });
     ytRow->addWidget(m_ytDlpEdit, 1);
     ytRow->addWidget(ytReset);

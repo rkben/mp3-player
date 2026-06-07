@@ -48,6 +48,8 @@ qt_add_executable(mp3player
     src/MediaSession.h
     src/RemoteResolver.cpp
     src/RemoteResolver.h
+    src/YtDlpManager.cpp
+    src/YtDlpManager.h
     src/Toast.cpp
     src/Toast.h
     src/Notifier.cpp
