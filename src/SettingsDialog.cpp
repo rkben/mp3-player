@@ -5,6 +5,7 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QTabWidget>
+#include <QScrollArea>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -39,6 +40,18 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
 
     auto *root = new QVBoxLayout(this);
     auto *tabs = new QTabWidget;
+
+    // Each tab's content can outgrow the dialog (small screens, the Library folder
+    // list, the Discord row, etc.), so wrap every tab in a vertically-scrolling area.
+    // setWidgetResizable lets the content keep its natural width and only scroll once
+    // it's taller than the viewport.
+    auto scrollable = [](QWidget *content) -> QWidget * {
+        auto *area = new QScrollArea;
+        area->setWidgetResizable(true);
+        area->setFrameShape(QFrame::NoFrame);
+        area->setWidget(content);
+        return area;
+    };
     root->addWidget(tabs);
 
     // ---- General tab ----
@@ -84,7 +97,7 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_audioCombo->setToolTip(tr("Where to send audio. \"System default\" follows "
                                 "the OS's current output device."));
 
-    tabs->addTab(buildGeneralTab(), tr("General"));
+    tabs->addTab(scrollable(buildGeneralTab()), tr("General"));
 
     connect(m_themeCombo, &QComboBox::currentIndexChanged, this,
             &SettingsDialog::onThemeRowChanged);
@@ -107,10 +120,10 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     QWidget *library = buildLibraryTab(autoSync);
     for (const LibraryFolder &f : folders)
         addFolderRow(f);   // m_folderTable exists once buildLibraryTab has run
-    tabs->addTab(library, tr("Library"));
-    tabs->addTab(buildLogTab(), tr("Log"));
-    tabs->addTab(buildAboutTab(), tr("About"));
-    tabs->setCurrentWidget(library);
+    tabs->addTab(scrollable(library), tr("Library"));
+    tabs->addTab(scrollable(buildLogTab()), tr("Log"));
+    tabs->addTab(scrollable(buildAboutTab()), tr("About"));
+    tabs->setCurrentIndex(0);   // open on General
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
