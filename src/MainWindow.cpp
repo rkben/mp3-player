@@ -13,6 +13,8 @@
 #include "Notifier.h"
 #include "Importer.h"
 #include "ImportDialog.h"
+#include "PlaylistEditorDialog.h"
+#include "TrackListModel.h"   // totalDurationMs()
 #include "MediaSession.h"
 
 #include <QVBoxLayout>
@@ -321,11 +323,19 @@ void MainWindow::buildUi()
     plButtons->setContentsMargins(6, 6, 6, 0);
     auto *createBtn = new QPushButton(tr("Create"));
     auto *importBtn = new QPushButton(tr("Import"));
+    auto *editBtn = new QPushButton(tr("Edit"));
     importBtn->setToolTip(tr("Import a track or playlist from a URL (yt-dlp)"));
+    editBtn->setToolTip(tr("Open the playlist editor"));
     connect(createBtn, &QPushButton::clicked, this, &MainWindow::createPlaylist);
     connect(importBtn, &QPushButton::clicked, this, &MainWindow::importFromUrl);
+    connect(editBtn, &QPushButton::clicked, this, [this] {
+        // Open on the tab's current selection, if any.
+        QListWidgetItem *sel = m_playlistList->currentItem();
+        openPlaylistEditor(sel ? sel->data(Qt::UserRole).toString() : QString());
+    });
     plButtons->addWidget(createBtn);
     plButtons->addWidget(importBtn);
+    plButtons->addWidget(editBtn);
     plButtons->addStretch(1);
 
     auto *playlistTab = new QWidget;
@@ -1456,9 +1466,7 @@ void MainWindow::updateQueueTitle()
     static const QLocale locale;
     const QString base = m_currentPlaylist.isEmpty() ? tr("Queue") : m_currentPlaylist;
     const QString modified = m_queueDirty ? tr(" [modified]") : QString();
-    qint64 total = 0;
-    for (const Track &t : m_controller->queue())
-        total += t.durationMs;
+    const qint64 total = totalDurationMs(m_controller->queue());
     m_queueTitle->setText(QStringLiteral("%1%2 (%3 - %4)").arg(
         base, modified, locale.toString(m_controller->queueSize()),
         formatDurationLong(total)));
@@ -1628,6 +1636,8 @@ void MainWindow::onPlaylistContextMenu(const QPoint &pos)
     QMenu menu(this);
     connect(menu.addAction(tr("Play")), &QAction::triggered, this,
             [this, name] { loadPlaylist(name); });
+    connect(menu.addAction(tr("Edit…")), &QAction::triggered, this,
+            [this, name] { openPlaylistEditor(name); });
     connect(menu.addAction(tr("Rename…")), &QAction::triggered, this, [this, name] {
         bool ok = false;
         const QString to = QInputDialog::getText(
@@ -1650,6 +1660,21 @@ void MainWindow::onPlaylistContextMenu(const QPoint &pos)
         }
     });
     menu.exec(m_playlistList->viewport()->mapToGlobal(pos));
+}
+
+void MainWindow::openPlaylistEditor(const QString &preselect)
+{
+    // The editor works in full-metadata Tracks; hand it the library snapshot and the
+    // existing path->Track resolver so it doesn't re-query the DB. On save it writes
+    // the m3u8 directly via the store, then signals us to refresh the tab list.
+    PlaylistEditorDialog dlg(
+        m_fullLibrary, &m_store,
+        [this](const QStringList &keys) { return tracksForKeys(keys); },
+        preselect, this);
+    connect(&dlg, &PlaylistEditorDialog::playlistsChanged, this, [this] {
+        refreshPlaylists();
+    });
+    dlg.exec();
 }
 
 void MainWindow::createPlaylist()

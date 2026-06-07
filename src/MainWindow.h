@@ -60,6 +60,7 @@ private slots:
     void onTreeContextMenu(const QPoint &pos);
     void onQueueContextMenu(const QPoint &pos);
     void onPlaylistContextMenu(const QPoint &pos);
+    void openPlaylistEditor(const QString &preselect = QString());
     void createPlaylist();     // Playlists tab: make a new empty playlist
     void importFromUrl();      // Playlists tab: yt-dlp import modal
     void onCurrentTrackChanged(const Track &track);

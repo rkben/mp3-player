@@ -58,6 +58,10 @@ qt_add_executable(mp3player
     src/ImportDialog.h
     src/PlaylistModel.cpp
     src/PlaylistModel.h
+    src/TrackListModel.cpp
+    src/TrackListModel.h
+    src/PlaylistEditorDialog.cpp
+    src/PlaylistEditorDialog.h
     src/SettingsDialog.cpp
     src/SettingsDialog.h
     src/MusicLibrary.cpp
