@@ -15,6 +15,10 @@ namespace Theme {
 enum class Mode { System, Dark, Custom };
 
 // Colour + font tokens that drive the built-in stylesheet template.
+//
+// These are the built-in *Dark* theme's knobs. They only affect Dark mode — System
+// inherits the platform style untouched (see the macOS notes by apply() below), and
+// Custom authors its own sheet. Tune a value here and the whole Dark theme follows.
 struct Tokens {
     QString bg;          // window background
     QString surface;     // panels, inputs, headers, lists
@@ -26,6 +30,16 @@ struct Tokens {
     int fontBase = 14;   // body text (px)
     int fontTitle = 15;  // track title (px)
     int fontSmall = 12;  // captions/status (px)
+    // Geometry knobs (px). Pulled into the QSS so corner rounding and the round
+    // transport buttons are tunable from here rather than buried as literals.
+    int radius = 6;        // inputs, cover, general corner rounding
+    int buttonRadius = 24; // flat round transport buttons (half the 44px hit target)
+    // Slider + scrollbar dimensions. Only the primary thickness is a knob; the
+    // dependent corner radii and the handle's centring margin are derived from
+    // these in buildStyleSheet so changing one value keeps the shape coherent.
+    int scrollbarWidth = 10; // vertical scrollbar track/handle thickness
+    int sliderGroove = 5;    // seek/volume groove height
+    int sliderHandle = 16;   // seek/volume handle diameter
 };
 
 Tokens darkTokens();

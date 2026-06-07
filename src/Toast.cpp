@@ -11,6 +11,12 @@ ToastArea *ToastArea::s_instance = nullptr;
 namespace {
 constexpr int kToastMs = 4000;     // how long a toast lingers
 constexpr int kMaxToasts = 4;      // cap visible stack
+// Vertical anchor: toasts sit between a top and bottom stretch weighted
+// kTopWeight:kBottomWeight, i.e. ~75% down the overlay — clear of the transport bar
+// at the bottom. Raise kTopWeight to push lower, lower it to raise. Pills are
+// right-aligned (see addToast).
+constexpr int kTopWeight = 3;
+constexpr int kBottomWeight = 1;
 }
 
 ToastArea::ToastArea(QWidget *parent)
@@ -25,7 +31,10 @@ ToastArea::ToastArea(QWidget *parent)
     m_layout = new QVBoxLayout(this);
     m_layout->setContentsMargins(12, 12, 12, 16);
     m_layout->setSpacing(6);
-    m_layout->addStretch(1);   // pin toasts to the bottom
+    // Top and bottom stretches sandwich the toast stack at ~75% height (see the
+    // weight knobs above). Toasts are inserted between them in addToast().
+    m_layout->addStretch(kTopWeight);
+    m_layout->addStretch(kBottomWeight);
 
     parent->installEventFilter(this);   // track the parent's size/position
     reposition();
@@ -60,10 +69,12 @@ void ToastArea::addToast(const QString &text)
         "  background: rgba(40,40,40,235); color: #f0f0f0;"
         "  border: 1px solid rgba(255,255,255,40); border-radius: 8px;"
         "  padding: 8px 12px; }");
-    m_layout->addWidget(pill, 0, Qt::AlignHCenter);
+    // Insert just before the bottom stretch (last item), anchored to the right.
+    m_layout->insertWidget(m_layout->count() - 1, pill, 0, Qt::AlignRight);
 
-    // Evict the oldest toast if we exceed the cap (index 0 is the stretch).
-    while (m_layout->count() - 1 > kMaxToasts) {
+    // Evict the oldest toast if we exceed the cap. The stack is bracketed by two
+    // stretches, so toast count is count()-2 and the oldest toast is at index 1.
+    while (m_layout->count() - 2 > kMaxToasts) {
         if (auto *item = m_layout->itemAt(1)) {
             if (QWidget *w = item->widget())
                 w->deleteLater();

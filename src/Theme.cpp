@@ -37,7 +37,7 @@ QString buildStyleSheet(const Tokens &t)
         /* Elevated surfaces (distinct from the window background). */
         QWidget#infoPanel, QFrame#transportBar { background:%2; }
         QFrame#transportBar { border-top:1px solid %7; }
-        QLabel#coverArt { background:%3; border-radius:6px; }
+        QLabel#coverArt { background:%3; border-radius:%11px; }
         QLabel#status {
             color:%5; font-size:%10px; background:%2;
             border-top:1px solid %7; padding:4px 12px;
@@ -66,23 +66,32 @@ QString buildStyleSheet(const Tokens &t)
         QSplitter::handle { background:%7; }
 
         /* Inputs: rounded, accent focus ring. */
-        QLineEdit, QComboBox { border:1px solid %7; border-radius:6px; padding:5px 8px; }
+        QLineEdit, QComboBox { border:1px solid %7; border-radius:%11px; padding:5px 8px; }
         QLineEdit:focus { border:1px solid %6; }
 
         /* Flat round transport buttons; accent fill when toggled on. */
-        QToolButton { background:transparent; border-radius:24px; }
+        QToolButton { background:transparent; border-radius:%12px; }
         QToolButton:checked { background:%6; }
 
-        /* Slider + scrollbar shapes. */
-        QScrollBar:vertical { background:transparent; width:10px; margin:0; }
-        QScrollBar::handle:vertical { background:%7; border-radius:5px; min-height:24px; }
+        /* Slider + scrollbar shapes (dimensions from tokens; radii/margin derived). */
+        QScrollBar:vertical { background:transparent; width:%13px; margin:0; }
+        QScrollBar::handle:vertical { background:%7; border-radius:%14px; min-height:24px; }
         QScrollBar::add-line, QScrollBar::sub-line { height:0; }
-        QSlider::groove:horizontal { height:5px; background:%7; border-radius:2px; }
-        QSlider::sub-page:horizontal { background:%6; border-radius:2px; }
-        QSlider::handle:horizontal { background:%4; width:16px; margin:-6px 0; border-radius:8px; }
+        QSlider::groove:horizontal { height:%15px; background:%7; border-radius:%16px; }
+        QSlider::sub-page:horizontal { background:%6; border-radius:%16px; }
+        QSlider::handle:horizontal { background:%4; width:%17px; margin:%18px 0; border-radius:%19px; }
     )")
         .arg(t.bg, t.surface, t.surfaceAlt, t.text, t.textDim, t.accent, t.border)
-        .arg(t.fontTitle).arg(t.fontSmall);
+        // %8 is intentionally unused; fontTitle/fontSmall land on %9/%10, then the
+        // geometry knobs on %11/%12, then the slider/scrollbar dims on %13-%19
+        // (arg() fills the lowest remaining marker).
+        .arg(t.fontTitle).arg(t.fontSmall).arg(t.radius).arg(t.buttonRadius)
+        // Derived: handle/track radii are half their thickness (full rounding); the
+        // handle's negative vertical margin centres it over the thinner groove.
+        .arg(t.scrollbarWidth).arg(t.scrollbarWidth / 2)
+        .arg(t.sliderGroove).arg(t.sliderGroove / 2)
+        .arg(t.sliderHandle).arg(-(t.sliderHandle - t.sliderGroove) / 2)
+        .arg(t.sliderHandle / 2);
 }
 
 // A dark QPalette built from the same tokens, so native widgets, icon tinting,
@@ -110,6 +119,33 @@ static QPalette darkPalette(const Tokens &t)
     return p;
 }
 
+// ----------------------------------------------------------------------------
+// macOS native (System mode) knobs — reference: the notes/ screenshots are the
+// *native* QMacStyle target (one dark, one light), NOT this file's Dark theme.
+// System mode below applies no stylesheet and restores the native palette, so the
+// app gets QMacStyle as-is. To tune how native that looks, the levers are:
+//
+//  - Palette: do NOT override it in System mode. QMacStyle (like the old Vista
+//    style) drives colours from native theme engines, not the QPalette, so a
+//    setPalette() there is ignored at best and fights the system accent/dark mode
+//    at worst. We restore nativePalette and leave it; keep it that way.
+//
+//  - Dark/light follow the system automatically under QMacStyle. The one thing
+//    that breaks it is Info.plist `NSRequiresAquaSystemAppearance=true` (forces
+//    light) — leave it unset. See resources/macos/Info.plist.in.
+//
+//  - macOS 26 Tahoe "Liquid Glass": Qt 6.11 adapts QMacStyle to it. Building
+//    against the macOS 26 SDK (Xcode 16+) opts in; to keep the pre-Tahoe look and
+//    metrics, set Info.plist `UIDesignRequiresCompatibility=YES` (knob lives in
+//    Info.plist.in). Tinted-vs-Clear glass is a user OS setting, not ours.
+//
+//  - Transport buttons: the native shots show QMacStyle drawing a rounded bezel
+//    around our autoRaise QToolButtons (MainWindow::buildTransportBar). autoRaise
+//    alone does not fully flatten them on macOS. To get borderless media-style
+//    controls there, the knob is a small System-mode-only QSS
+//    (`QToolButton{border:0;background:transparent}`) or per-button styling — see
+//    the note in buildTransportBar. We currently leave the native bezel.
+// ----------------------------------------------------------------------------
 void apply(Mode mode, const QString &customPath)
 {
     // The platform/native palette, captured once before we override it, so System

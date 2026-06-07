@@ -574,6 +574,13 @@ QWidget *MainWindow::buildTransportBar()
 
     // Two rows: centred transport buttons over a full-width seek bar, with the
     // volume + settings cluster anchored to the right.
+    //
+    // macOS-native knob: under QMacStyle (System mode) these autoRaise buttons
+    // still render with a rounded bezel (see notes/ native screenshots) — autoRaise
+    // does not fully flatten QToolButtons on macOS. For borderless media controls
+    // there, give the bar a System-mode-only QSS in Theme::apply, e.g.
+    //   QFrame#transportBar QToolButton { border:0; background:transparent; }
+    // The built-in Dark theme already flattens them (Theme buttonRadius token).
     auto makeBtn = [this](QStyle::StandardPixmap pm) {
         auto *b = new QToolButton;
         b->setIcon(style()->standardIcon(pm));

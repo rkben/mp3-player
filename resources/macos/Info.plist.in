@@ -24,6 +24,16 @@
     <string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- macOS appearance knobs (see src/Theme.cpp "macOS native knobs"):
+         * Leave NSRequiresAquaSystemAppearance unset so dark/light follows the
+           system. Setting it <true/> pins the app to light mode under QMacStyle.
+         * macOS 26 Tahoe "Liquid Glass": when built against the macOS 26 SDK
+           (Xcode 16+), uncomment the key below to keep the pre-Tahoe look and
+           metrics (Qt 6.11 compatibility mode). Remove it to opt into Liquid Glass.
+    <key>UIDesignRequiresCompatibility</key>
+    <true/>
+    -->
+
     <key>NSHumanReadableCopyright</key>
     <string>${MACOSX_BUNDLE_COPYRIGHT}</string>
 </dict>
