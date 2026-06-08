@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Pocket Player
+GenericName=Music Player
+Comment=Local library + remote streaming music player
+Exec=mp3player
+Icon=pocketplayer
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupWMClass=mp3player
+Keywords=music;audio;player;mp3;flac;

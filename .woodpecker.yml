@@ -1,0 +1,62 @@
+# Woodpecker CI: build the Linux AppImage in a controlled, older-glibc base so the
+# artifact is portable (not pinned to this dev box's rolling glibc).
+#
+# Base: Debian 13 "trixie" — glibc 2.41, current Debian stable. Anything built here
+# runs on Debian 13+/Ubuntu 24.04+/other recent distros. Bonus: trixie ships TagLib
+# 2.0.2 (libtag1-dev) WITH its CMake config, so no from-source TagLib build.
+#
+# Qt comes from aqtinstall (official Qt 6.11 + its self-contained FFmpeg) — same as
+# the local script and the macOS build. The app then bundles Qt's clean FFmpeg, not
+# the host's encoder tree (that mismatch was the segfault). See notes/linux.md.
+
+when:
+  - event: [push, manual]
+    branch: main
+  - event: tag
+
+steps:
+  - name: appimage
+    image: debian:13
+    environment:
+      # AppImage tooling (linuxdeploy*, appimagetool) is itself shipped as AppImages;
+      # CI containers usually lack FUSE, so extract-and-run instead of mounting.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      DEBIAN_FRONTEND: noninteractive
+    commands:
+      # --- toolchain + Qt/X11 runtime libs linuxdeploy resolves at deploy time ---
+      - apt-get update
+      - >-
+        apt-get install -y --no-install-recommends
+        build-essential cmake ninja-build git curl ca-certificates file
+        python3 python3-venv
+        zlib1g-dev libtag1-dev
+        libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev
+        libfontconfig1-dev libfreetype-dev libdbus-1-dev
+        libx11-dev libxext-dev libxrender-dev libxrandr-dev libxi-dev
+        libxcb1-dev libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev
+        libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev
+        libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-xkb-dev
+        libxcb-util-dev libxcb-glx0-dev
+        libwayland-dev wayland-protocols
+      # --- official Qt (+ self-contained FFmpeg) via aqtinstall, into /opt/Qt ---
+      # venv: trixie's pip is PEP-668 externally-managed.
+      - python3 -m venv /opt/aqt
+      - /opt/aqt/bin/pip install --quiet --upgrade pip aqtinstall
+      - /opt/aqt/bin/aqt install-qt linux desktop 6.11.1 linux_gcc_64 -m qtmultimedia -O /opt/Qt
+      # --- build + package (the script auto-detects Qt, or honours QT_DIR) ---
+      - QT_DIR=/opt/Qt/6.11.1/gcc_64 scripts/package-appimage.sh
+      - ls -lh Pocket_Player-x86_64.AppImage
+
+  # --- Publish the artifact -----------------------------------------------------
+  # Woodpecker has no built-in artifact store; wire up whichever sink matches your
+  # setup. Example: attach to a GitHub/Gitea release on tag builds. Replace the
+  # plugin + settings to match your forge/credentials, then drop the `failure`.
+  #
+  # - name: release
+  #   image: woodpeckerci/plugin-release        # or plugin-github-release / plugin-gitea-release
+  #   when:
+  #     - event: tag
+  #   settings:
+  #     files: Pocket_Player-x86_64.AppImage
+  #     api_key:
+  #       from_secret: release_token

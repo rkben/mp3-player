@@ -1,7 +1,15 @@
 /build/
 /build-mac/
 /build-mac-uni/
-/.deps/             # from-source deps (static TagLib, etc.) — see scripts/
+# AppImage build tree (scripts/package-appimage.sh)
+/build-appimage/
+# staged AppDir for linuxdeploy
+/AppDir/
+# cached linuxdeploy + plugin AppImages + stubs
+/scripts/.tools/
+*.AppImage
+# from-source deps (static TagLib, etc.) — see scripts/
+/.deps/
 *.user
 .cache/
 compile_commands.json

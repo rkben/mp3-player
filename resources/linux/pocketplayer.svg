@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Placeholder app icon for Pocket Player; replace with a real icon when ready. -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#15171c"/>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="none" stroke="#2f6df0" stroke-width="6"/>
+  <!-- Eighth note -->
+  <g fill="#e8eaed">
+    <rect x="150" y="56" width="14" height="118" rx="4"/>
+    <path d="M164 56 c40 6 44 34 40 60 c-10 -28 -26 -30 -40 -28 z"/>
+    <ellipse cx="132" cy="178" rx="30" ry="22" transform="rotate(-18 132 178)"/>
+  </g>
+</svg>

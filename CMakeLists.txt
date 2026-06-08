@@ -163,6 +163,16 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos/Info.plist.in")
 endif()
 
+# ---- Linux install rules (populate an AppDir for linuxdeploy / AppImage) ----
+if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
+    install(TARGETS mp3player RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES resources/linux/pocketplayer.desktop
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES resources/linux/pocketplayer.svg
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+endif()
+
 # ---- Static-Qt plugin imports (Windows single-exe build) ----
 # With dynamic Qt, plugins are DLLs loaded at runtime and nothing here is needed.
 # With a STATIC Qt they must be linked in explicitly (Q_IMPORT_PLUGIN), or features
