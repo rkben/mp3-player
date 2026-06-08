@@ -36,6 +36,7 @@ DEPLOY_TARGET ?= 13.0
 .DEFAULT_GOAL := build
 
 .PHONY: configure build rebuild run clean demo demo-run help \
+        appimage \
         macos-configure macos macos-run macos-dmg
 
 ## configure: generate the build tree
@@ -63,6 +64,13 @@ demo:
 demo-run: demo
 	$(BUILD)/shader_demo $(ARGS)
 
+## appimage: build a portable Linux AppImage (needs official Qt under ~/Qt — see notes/linux.md)
+# Mirrors macos-dmg: delegates to scripts/package-appimage.sh, which builds against
+# the official Qt's clean FFmpeg (autodetects ~/Qt/<ver>/gcc_64; override with
+# QT_DIR=...). Run from $(SRC) to keep the canonical-path AUTOMOC contract.
+appimage:
+	cd $(SRC) && scripts/package-appimage.sh
+
 ## macos-configure: configure the official-Qt macOS build (qt-cmake -> build-mac)
 macos-configure:
 	@[ -n "$(QT_DIR)" ] || { echo "error: no official Qt found under ~/Qt; set QT_DIR=/path/to/Qt/<ver>/macos (see notes/macos.md)"; exit 1; }
@@ -84,9 +92,10 @@ macos-run: macos
 macos-dmg:
 	ARCHS="$(MACOS_ARCHS)" scripts/package-macos.sh
 
-## clean: remove the build tree (both Linux and macOS)
+## clean: remove the build trees + AppImage staging/output (Linux and macOS)
 clean:
-	rm -rf $(BUILD) $(BUILD_MAC)
+	rm -rf $(BUILD) $(BUILD_MAC) \
+	       $(SRC)/build-appimage $(SRC)/AppDir $(SRC)/Pocket_Player-x86_64.AppImage
 
 ## help: list targets
 help:

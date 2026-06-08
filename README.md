@@ -30,7 +30,6 @@ I haven't read most of this, initially an experiment and turned out okay.
 - DB invalidation improvements (probably too fragile as-is)
 - Checking for new updates via GH latest/releases
 - Better custom stylesheet support
-- Linux AppImage
 - Windows build *sigh*
 - Handful of UI tweaks
   - Spacing of elements
@@ -38,6 +37,7 @@ I haven't read most of this, initially an experiment and turned out okay.
   - Better matching Qt6 to MacOS
   - Probably tweaks to match Windows *sigh*
 - Building on Woodpecker -> push to GH releases
+  - AppImage pipeline scaffolded (`.woodpecker.yml`); release-publish step still a placeholder
 - MacOS's implementation of SMB is garbage and slow
   - #wontfix but I'm mad
 - Edge cases for some interaction
@@ -99,6 +99,21 @@ cmake --build build -j
 | `BUILD_SHADER_DEMO` | `OFF` | Build the standalone `QRhiWidget` shader/visualizer demo. |
 
 e.g. `cmake -B build -S . -DENABLE_MPRIS=OFF -DENABLE_DISCORD_RPC=OFF`
+
+### Packaging (Linux AppImage)
+
+```sh
+make appimage          # -> Pocket_Player-x86_64.AppImage
+```
+
+Builds against the official Qt (aqtinstall, like the macOS build); install it once:
+
+```sh
+python3 -m venv ~/.aqt-venv && ~/.aqt-venv/bin/pip install aqtinstall
+~/.aqt-venv/bin/aqt install-qt linux desktop 6.11.1 linux_gcc_64 -m qtmultimedia -O ~/Qt
+```
+
+See `notes/linux.md` for the details (CI, bundling, styling).
 
 ## Layout
 

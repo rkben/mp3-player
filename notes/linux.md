@@ -9,11 +9,11 @@ this rolling-Arch box gives an artifact for this machine + very recent distros;
 the **Woodpecker CI** path (below) builds it in a Debian 13 container (glibc 2.41)
 for a portable artifact.
 
-### Why official Qt (the FFmpeg segfault)
+### Why official Qt (the FFmpeg backend)
 The earlier builds linked the **system** Qt against Arch's **desktop FFmpeg**, whose
 `libavcodec` hard-links a whole encoder/hw-accel tree (`dav1d`, `rav1e`, `SvtAv1Enc`,
-`libva`, `glib`, …). Bundling that against mismatched host libs **segfaulted at
-playback**. Official Qt instead ships a maintainer-tested, self-contained FFmpeg 7.1
+`libva`, `glib`, …) — that doesn't bundle reliably against mismatched host libs.
+Official Qt instead ships a maintainer-tested, self-contained FFmpeg 7.1
 (`libavcodec.so.61`) that uses **dlopen stub libs** (`libQt6FFmpegStub-*`) for
 hw-accel/TLS — so its `libav*` drag in nothing but `z`/`bz2` and bundle cleanly. The
 old per-encoder `--exclude-library` / GLib-strip hacks are gone as a result.

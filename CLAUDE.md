@@ -20,7 +20,7 @@ cmake --build --preset macos
 Or plain: `cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j`.
 
 On Linux the `Makefile` offers shortcuts (`make`, `make run`, `make rebuild`,
-`make demo-run`).
+`make demo-run`, `make appimage`).
 
 ### Build options
 - `ENABLE_MPRIS` — `ON` on Linux, `OFF` elsewhere. Pulls in `Qt6::DBus`.
@@ -42,6 +42,18 @@ backend, so only TagLib (Homebrew) is external. The media session (Now Playing /
 media keys) can't be smoke-tested headless and only works from a **code-signed
 `.app` launched via `open`**. `scripts/package-macos.sh` does configure → build →
 deploy → sign → self-contained `.dmg`. Full setup in `notes/macos.md`.
+
+**Linux AppImage:** `make appimage` (→ `scripts/package-appimage.sh`) builds a
+portable `Pocket_Player-x86_64.AppImage`. Like macOS, it builds against **official
+Qt** under `~/Qt` (aqtinstall, autodetected; `QT_DIR=` to override), **not** the
+system Qt — official Qt's self-contained FFmpeg bundles cleanly, whereas the host's
+desktop FFmpeg drags in a heavy encoder/hw-accel tree that doesn't bundle reliably.
+The script deploys via `linuxdeploy --plugin qt`, forces the Wayland plugins,
+stubs/strips the non-SQLite SQL drivers, and bundles the xdg-portal theme (Fusion
+base; no KDE Breeze/KF6). `NO_STRIP=1` is forced because linuxdeploy's bundled
+`strip` chokes on modern `.relr.dyn` (and bundled Qt/system libs already ship
+stripped anyway). `.woodpecker.yml` builds it in a Debian 13 container for a portable
+artifact. Full detail in `notes/linux.md`.
 
 ## Architecture
 

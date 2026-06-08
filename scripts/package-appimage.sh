@@ -9,8 +9,8 @@
 # contained FFmpeg backend that uses dlopen *stub* libs (libQt6FFmpegStub-*) for
 # hw-accel/TLS, so its libav* drag in nothing but z/bz2 — it bundles cleanly. The
 # host's desktop FFmpeg instead hard-links a whole encoder tree (dav1d/rav1e/
-# SvtAv1/va/glib/…); bundling that against mismatched host libs segfaulted at
-# playback. The AppImage needs a glibc >= the build host's — fine on this machine;
+# SvtAv1/va/glib/…) that doesn't bundle reliably against mismatched host libs.
+# The AppImage needs a glibc >= the build host's — fine on this machine;
 # the Woodpecker/Debian-13 pipeline (.woodpecker.yml) builds it in a controlled,
 # older-glibc base for a portable artifact. yt-dlp is NOT bundled; the app
 # downloads/manages it at runtime.
