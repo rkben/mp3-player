@@ -25,6 +25,7 @@ int main(int argc, char *argv[])
 
     // Track / QList<Track> cross the worker-thread boundary via queued signals.
     qRegisterMetaType<QList<Track>>("QList<Track>");
+    qRegisterMetaType<Track>("Track");   // single-Track import-commit signals
 
     // Apply the saved theme before showing any UI. Default is System (native).
     QSettings s;

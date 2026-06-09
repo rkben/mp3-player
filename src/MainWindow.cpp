@@ -5,6 +5,7 @@
 #include "MusicLibrary.h"
 #include "RemoteResolver.h"
 #include "CoverLabel.h"
+#include "StatusStack.h"
 #include "Theme.h"
 #include "AudioFormats.h"
 #include "TimeFormat.h"
@@ -148,6 +149,12 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onQueueChanged);
     connect(m_controller, &PlayerController::playbackStateChanged,
             this, &MainWindow::onPlaybackStateChanged);
+    // Status hint while a remote stream is being resolved (yt-dlp) and opened. Posted to
+    // its own (higher-priority) slot, so it overlays any scan/import line and the lower
+    // line reappears when it clears — see StatusStack.
+    connect(m_controller, &PlayerController::remoteResolving, this, [this](bool active) {
+        m_status->post(StatusStack::Fetch, active ? tr("Fetching remote track…") : QString());
+    });
     connect(m_controller, &PlayerController::positionChanged,
             this, &MainWindow::onPositionChanged);
     connect(m_controller, &PlayerController::durationChanged,
@@ -278,13 +285,20 @@ void MainWindow::startLibraryThread()
     connect(m_importer, &Importer::failed, this, [](const QString &msg) {
         Notifier::notify(tr("Import failed"), msg);
     });
-    connect(m_importer, &Importer::finished, this,
-            [this](const QList<Track> &tracks, const QString &createName,
-                   const QString &appendName) {
+    // Two-phase resumable import (see Importer / MusicLibrary). The library worker owns
+    // the resume table so a track-insert and its resume-row clear commit atomically;
+    // the m3u8/notify fires once per job when its last entry is committed.
+    connect(m_importer, &Importer::enumerated, m_library, &MusicLibrary::beginImportJob);
+    connect(m_importer, &Importer::trackImported, m_library, &MusicLibrary::commitImportedTrack);
+    connect(m_importer, &Importer::importEntriesFailed, m_library, &MusicLibrary::failImportEntries);
+    connect(m_library, &MusicLibrary::resumeImportJob, m_importer, &Importer::resumeImportJob);
+    connect(m_library, &MusicLibrary::importEntriesDropped, this,
+            [](int n) { ToastArea::post(tr("%n track(s) couldn't be imported", nullptr, n)); });
+    connect(m_library, &MusicLibrary::importJobFinished, this,
+            [this](const QString &createName, const QString &appendName,
+                   const QList<Track> &tracks) {
                 if (tracks.isEmpty())
                     return;
-                emit importTracks(tracks);   // worker inserts + re-emits libraryLoaded
-
                 QStringList lines;
                 lines.reserve(tracks.size());
                 for (const Track &t : tracks)
@@ -298,6 +312,9 @@ void MainWindow::startLibraryThread()
                 Notifier::notify(tr("Import complete"),
                                  tr("Added %n track(s).", nullptr, int(tracks.size())));
             });
+
+    // Replay any imports interrupted by a previous quit/crash, in the background.
+    QMetaObject::invokeMethod(m_library, "loadPendingImports", Qt::QueuedConnection);
 }
 
 void MainWindow::buildUi()
@@ -414,7 +431,7 @@ void MainWindow::buildUi()
     root->addWidget(buildTransportBar());
 
     // --- Bottom status bar: only shown during background work (e.g. syncing) ---
-    m_status = new QLabel;
+    m_status = new StatusStack;
     m_status->setObjectName("status");
     // Nudge the text right so it clears macOS's rounded bottom-left window corner.
     // Set in code (not just the Dark QSS) so it also applies under the native style.
@@ -1123,24 +1140,18 @@ void MainWindow::onScanProgress(int done, int total, const QString &sourceLabel,
     if (total <= 0)
         return;
     const QString src = sourceLabel.isEmpty() ? tr("library") : sourceLabel;
-    m_status->setText(tr("Importing from %1 (%L2/%L3): %4")
-                          .arg(src).arg(done).arg(total).arg(fileName));
-    m_status->show();
+    m_status->post(StatusStack::Scan, tr("Importing from %1 (%L2/%L3): %4")
+                                          .arg(src).arg(done).arg(total).arg(fileName));
 }
 
 void MainWindow::onScanStatus(const QString &message)
 {
-    if (message.isEmpty()) {
-        m_status->hide();
-        // Scripted-benchmark hook: quit cleanly after a scan so logs flush.
-        // (Timing print itself is PP_SCAN_BENCH and does not quit — that lets
-        // you run normally and watch parse timing while tuning the real library.)
-        if (qEnvironmentVariableIsSet("PP_SCAN_QUIT"))
-            qApp->quit();
-    } else {
-        m_status->setText(message);
-        m_status->show();
-    }
+    m_status->post(StatusStack::Scan, message);
+    // Scripted-benchmark hook: quit cleanly after a scan so logs flush.
+    // (Timing print itself is PP_SCAN_BENCH and does not quit — that lets
+    // you run normally and watch parse timing while tuning the real library.)
+    if (message.isEmpty() && qEnvironmentVariableIsSet("PP_SCAN_QUIT"))
+        qApp->quit();
 }
 
 void MainWindow::restoreSettings()
@@ -1802,10 +1813,6 @@ void MainWindow::createPlaylist()
 
 void MainWindow::importFromUrl()
 {
-    if (m_importer->busy()) {
-        ToastArea::post(tr("An import is already running."));
-        return;
-    }
     QSettings s;
     ImportDialog dlg(m_store.names(),
                      s.value("import/createPlaylist", false).toBool(),
@@ -1815,7 +1822,11 @@ void MainWindow::importFromUrl()
 
     s.setValue("import/createPlaylist", dlg.createPlaylist());
     s.setValue("import/appendTo", dlg.appendPlaylist());
+    // Imports queue (FIFO): if one is already running, this starts when it finishes.
+    const bool wasBusy = m_importer->busy();
     m_importer->start(dlg.url(), dlg.createPlaylist(), dlg.appendPlaylist());
+    if (wasBusy)
+        ToastArea::post(tr("Import queued — it'll start when the current one finishes."));
 }
 
 void MainWindow::onQueueChanged(const QList<Track> &queue)

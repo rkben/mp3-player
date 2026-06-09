@@ -78,6 +78,7 @@ qt_add_executable(mp3player
     src/TrackUri.h
     src/ProcUtil.h
     src/CoverLabel.h
+    src/StatusStack.h
     src/AudioFormats.h
     src/TimeFormat.h
     resources/resources.qrc

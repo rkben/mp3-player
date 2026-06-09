@@ -16,6 +16,7 @@
 #include <QSettings>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QTimer>
 
 #include <QCryptographicHash>
 #include <QDate>
@@ -34,6 +35,7 @@ namespace {
 // Bump on any `tracks` schema change. A DB whose PRAGMA user_version differs is
 // rebuilt on open (remote rows salvaged, local rows re-derived by the folder scan).
 constexpr int kSchemaVersion = 1;
+constexpr int kMaxImportAttempts = 3;   // resume tries before an entry is given up on
 constexpr int kCommitEvery = 1000;   // rows per transaction batch
 constexpr int kAppendBatch = 200;    // tracks per progressive UI append
 constexpr int kPumpEvery = 250;      // event-pump cadence (keep coarse: cheap GUI breathing room)
@@ -58,6 +60,14 @@ struct ParsedRow { Track track; qint64 mtime; };
 MusicLibrary::MusicLibrary(QObject *parent)
     : QObject(parent)
 {
+    // Coalesces the per-track libraryLoaded refresh during a busy import: reloading
+    // and re-sorting the whole library on every committed entry would be wasteful on
+    // a large playlist. Lives on the worker thread (moves with this object).
+    m_importRefreshTimer = new QTimer(this);
+    m_importRefreshTimer->setSingleShot(true);
+    m_importRefreshTimer->setInterval(300);
+    connect(m_importRefreshTimer, &QTimer::timeout, this,
+            [this] { if (m_opened) emit libraryLoaded(loadAll(nullptr)); });
 }
 
 MusicLibrary::~MusicLibrary()
@@ -107,9 +117,33 @@ bool MusicLibrary::ensureDb()
         createTracksTable();
         createFtsSchema();
     }
+    createImportsTable();   // additive; survives a schema rebuild untouched
 
     m_opened = true;
     return true;
+}
+
+void MusicLibrary::createImportsTable()
+{
+    // In-flight import state so an interrupted import resumes on the next launch.
+    // One row per enumerated entry; status flips 0->1 atomically with the track's
+    // insert (see commitImportedTrack). Independent of the `tracks` schema version,
+    // so it's created unconditionally and not dropped by rebuildSchema().
+    // entry_url is the enumerated (flat-playlist) URL we hand back to yt-dlp; one
+    // entry can hydrate into several tracks (a sub-playlist), so track_uri records the
+    // actual committed track identity (which may differ from entry_url — e.g. the
+    // archive.org direct-URL fallback). status flips 0->1 when an entry is satisfied.
+    QSqlQuery q(m_db);
+    q.exec(R"(CREATE TABLE IF NOT EXISTS imports_resume(
+                job_id    TEXT NOT NULL,
+                entry_url TEXT NOT NULL,
+                track_uri TEXT,
+                seq       INTEGER,
+                create_pl TEXT,
+                append_pl TEXT,
+                status    INTEGER NOT NULL DEFAULT 0,
+                attempts  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(job_id, entry_url)))");
 }
 
 void MusicLibrary::createFtsSchema()
@@ -413,13 +447,245 @@ void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
 
 void MusicLibrary::flushPendingImports()
 {
-    if (m_pendingImports.isEmpty())
+    // m_scanning is already false here, so the replayed ops run their own
+    // transactions normally rather than re-deferring. Move-out guards re-entrancy.
+    if (!m_pendingImports.isEmpty()) {
+        const QList<Track> pending = std::move(m_pendingImports);
+        m_pendingImports.clear();
+        importTracks(pending);
+    }
+    if (!m_deferredImports.isEmpty()) {
+        const QList<std::function<void()>> ops = std::move(m_deferredImports);
+        m_deferredImports.clear();
+        for (const auto &op : ops)
+            op();
+    }
+}
+
+void MusicLibrary::scheduleImportRefresh()
+{
+    // Called on the worker thread; the timer lives here too.
+    if (m_importRefreshTimer && !m_importRefreshTimer->isActive())
+        m_importRefreshTimer->start();
+}
+
+void MusicLibrary::beginImportJob(const QString &jobId, const QString &createName,
+                                  const QString &appendName, const QStringList &entryUrls)
+{
+    if (entryUrls.isEmpty() || !ensureDb())
         return;
-    // m_scanning is already false here, so importTracks() runs its own transaction
-    // normally rather than re-deferring. take() guards against re-entrancy.
-    const QList<Track> pending = std::move(m_pendingImports);
-    m_pendingImports.clear();
-    importTracks(pending);
+    if (m_scanning) {
+        m_deferredImports.append(
+            [=] { beginImportJob(jobId, createName, appendName, entryUrls); });
+        return;
+    }
+    m_db.transaction();
+    QSqlQuery q(m_db);
+    q.prepare("INSERT OR IGNORE INTO imports_resume"
+              "(job_id, entry_url, seq, create_pl, append_pl) VALUES(?,?,?,?,?)");
+    for (int i = 0; i < entryUrls.size(); ++i) {
+        q.addBindValue(jobId);
+        q.addBindValue(entryUrls.at(i));
+        q.addBindValue(i);
+        q.addBindValue(createName);
+        q.addBindValue(appendName);
+        if (!q.exec())
+            qWarning() << "[import] begin job row failed:" << q.lastError().text();
+    }
+    m_db.commit();
+    qInfo("[import] job %s — %lld entry(ies) queued",
+          qPrintable(jobId), static_cast<long long>(entryUrls.size()));
+}
+
+void MusicLibrary::commitImportedTrack(const QString &jobId, const QString &entryUrl,
+                                       const Track &track)
+{
+    if (!ensureDb())
+        return;
+    if (m_scanning) {
+        m_deferredImports.append(
+            [=] { commitImportedTrack(jobId, entryUrl, track); });
+        return;
+    }
+    // Upsert the track and clear its resume row in one transaction: a crash can never
+    // leave a track inserted-but-still-pending or a row cleared-but-not-inserted.
+    // (Inlined rather than insertRemoteRows() so it shares this one transaction —
+    // that helper manages its own, and SQLite has no nested transactions.)
+    m_db.transaction();
+    QSqlQuery ins(m_db);
+    ins.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
+                "duration, track_no, year, art_url) VALUES(?,NULL,1,0,?,?,?,?,?,?,?) "
+                "ON CONFLICT(uri) DO UPDATE SET "
+                "artist=excluded.artist, title=excluded.title, album=excluded.album, "
+                "duration=excluded.duration, track_no=excluded.track_no, "
+                "year=excluded.year, art_url=excluded.art_url");
+    ins.addBindValue(track.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
+    ins.addBindValue(track.artist.isEmpty() ? QVariant() : QVariant(track.artist));
+    ins.addBindValue(track.title);
+    ins.addBindValue(track.album);
+    ins.addBindValue(track.durationMs);
+    ins.addBindValue(track.trackNo);
+    ins.addBindValue(track.year);
+    ins.addBindValue(track.artUrl);
+    if (!ins.exec())
+        qWarning() << "[import] commit track failed:" << ins.lastError().text();
+
+    const QString trackUri = track.url.toString(QUrl::FullyEncoded);
+    // Claim the entry's pending row (record which track satisfied it). If the entry was
+    // already satisfied — a sub-playlist entry that hydrated into several tracks — log
+    // this extra track on its own done row so the m3u8 lists every track, not just one.
+    QSqlQuery up(m_db);
+    up.prepare("UPDATE imports_resume SET status=1, track_uri=? "
+               "WHERE job_id=? AND entry_url=? AND status=0");
+    up.addBindValue(trackUri);
+    up.addBindValue(jobId);
+    up.addBindValue(entryUrl);
+    if (!up.exec())
+        qWarning() << "[import] mark imported failed:" << up.lastError().text();
+    if (up.numRowsAffected() <= 0) {
+        QSqlQuery extra(m_db);
+        extra.prepare("INSERT OR REPLACE INTO imports_resume"
+                      "(job_id, entry_url, track_uri, status) VALUES(?,?,?,1)");
+        extra.addBindValue(jobId);
+        extra.addBindValue(trackUri);   // keyed by the track itself (its own row)
+        extra.addBindValue(trackUri);
+        extra.exec();
+    }
+    m_db.commit();
+
+    scheduleImportRefresh();
+    finalizeImportJobIfDone(jobId);
+}
+
+void MusicLibrary::failImportEntries(const QString &jobId, const QStringList &entryUrls)
+{
+    if (entryUrls.isEmpty() || !ensureDb())
+        return;
+    if (m_scanning) {
+        m_deferredImports.append([=] { failImportEntries(jobId, entryUrls); });
+        return;
+    }
+    int dropped = 0;
+    m_db.transaction();
+    for (const QString &url : entryUrls) {
+        QSqlQuery up(m_db);
+        up.prepare("UPDATE imports_resume SET attempts=attempts+1 "
+                   "WHERE job_id=? AND entry_url=? AND status=0");
+        up.addBindValue(jobId);
+        up.addBindValue(url);
+        up.exec();
+
+        QSqlQuery sel(m_db);
+        sel.prepare("SELECT attempts FROM imports_resume "
+                    "WHERE job_id=? AND entry_url=? AND status=0");
+        sel.addBindValue(jobId);
+        sel.addBindValue(url);
+        if (sel.exec() && sel.next() && sel.value(0).toInt() >= kMaxImportAttempts) {
+            QSqlQuery del(m_db);
+            del.prepare("DELETE FROM imports_resume WHERE job_id=? AND entry_url=?");
+            del.addBindValue(jobId);
+            del.addBindValue(url);
+            del.exec();
+            ++dropped;
+            qWarning().noquote()
+                << QStringLiteral("[import] giving up on entry after %1 attempts: %2")
+                       .arg(kMaxImportAttempts).arg(url);
+        }
+    }
+    m_db.commit();
+    if (dropped > 0)
+        emit importEntriesDropped(dropped);
+    finalizeImportJobIfDone(jobId);   // dropping the last laggard may complete the job
+}
+
+void MusicLibrary::finalizeImportJobIfDone(const QString &jobId)
+{
+    QSqlQuery pend(m_db);
+    pend.prepare("SELECT COUNT(*) FROM imports_resume WHERE job_id=? AND status=0");
+    pend.addBindValue(jobId);
+    if (!pend.exec() || !pend.next() || pend.value(0).toInt() > 0)
+        return;   // still entries to hydrate (or the query failed): not done
+
+    // Playlist intent lives on the enumerated rows (the extra sub-playlist rows carry
+    // NULL); pull it from one of them.
+    QString createName, appendName;
+    QSqlQuery pl(m_db);
+    pl.prepare("SELECT create_pl, append_pl FROM imports_resume "
+               "WHERE job_id=? AND create_pl IS NOT NULL LIMIT 1");
+    pl.addBindValue(jobId);
+    if (pl.exec() && pl.next()) {
+        createName = pl.value(0).toString();
+        appendName = pl.value(1).toString();
+    }
+
+    // Job drained: gather the committed tracks (enumeration order) for the m3u8/notify,
+    // then drop all its rows. track_uri is the real identity (an entry may have yielded
+    // several, or differ from entry_url via the dedup fallback); url-only rows suffice.
+    QSqlQuery q(m_db);
+    q.prepare("SELECT track_uri FROM imports_resume "
+              "WHERE job_id=? AND track_uri IS NOT NULL ORDER BY seq");
+    q.addBindValue(jobId);
+    if (!q.exec())
+        return;
+    QList<Track> tracks;
+    while (q.next()) {
+        Track t;
+        t.url = QUrl(q.value(0).toString());
+        tracks.append(t);
+    }
+    if (tracks.isEmpty())
+        return;   // nothing was ever imported (whole job failed out); nothing to finish
+
+    QSqlQuery del(m_db);
+    del.prepare("DELETE FROM imports_resume WHERE job_id=?");
+    del.addBindValue(jobId);
+    del.exec();
+
+    qInfo("[import] job %s finished — %lld track(s)",
+          qPrintable(jobId), static_cast<long long>(tracks.size()));
+    emit libraryLoaded(loadAll(nullptr));   // ensure the UI has every row before m3u8
+    emit importJobFinished(createName, appendName, tracks);
+}
+
+void MusicLibrary::loadPendingImports()
+{
+    if (!ensureDb())
+        return;
+    if (m_scanning) {   // finalize/replay below would nest in the scan's transaction
+        m_deferredImports.append([this] { loadPendingImports(); });
+        return;
+    }
+    QSqlQuery jobs(m_db);
+    if (!jobs.exec("SELECT DISTINCT job_id FROM imports_resume"))
+        return;
+    QStringList jobIds;
+    while (jobs.next())
+        jobIds << jobs.value(0).toString();
+
+    for (const QString &jobId : jobIds) {
+        QSqlQuery q(m_db);
+        q.prepare("SELECT entry_url, create_pl, append_pl FROM imports_resume "
+                  "WHERE job_id=? AND status=0 ORDER BY seq");
+        q.addBindValue(jobId);
+        if (!q.exec())
+            continue;
+        QStringList pending;
+        QString createName, appendName;
+        while (q.next()) {
+            pending << q.value(0).toString();
+            createName = q.value(1).toString();
+            appendName = q.value(2).toString();
+        }
+        if (pending.isEmpty()) {
+            // All entries imported last session but the job never finalized (e.g. a
+            // crash right after the final commit): finish it now.
+            finalizeImportJobIfDone(jobId);
+        } else {
+            qInfo("[import] resuming job %s — %lld pending entry(ies)",
+                  qPrintable(jobId), static_cast<long long>(pending.size()));
+            emit resumeImportJob(jobId, createName, appendName, pending);
+        }
+    }
 }
 
 void MusicLibrary::resolveArt(const QString &path)

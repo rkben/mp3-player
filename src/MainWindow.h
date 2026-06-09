@@ -25,6 +25,7 @@ class QTimer;
 class QListWidget;
 class QMenu;
 class CoverLabel;
+class StatusStack;
 class PlayerController;
 class MusicLibrary;
 class MediaSession;
@@ -156,7 +157,7 @@ private:
     QComboBox *m_scope;
     QTimer *m_searchTimer;
     QTimer *m_queueCacheTimer;   // debounces the resumable queue-cache write
-    QLabel *m_status;
+    StatusStack *m_status;   // layered status line (see StatusStack); post per slot
     QSlider *m_seek;
     QLabel *m_elapsed;
     QLabel *m_total;

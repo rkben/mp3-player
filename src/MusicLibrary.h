@@ -7,7 +7,11 @@
 #include <QAtomicInt>
 #include <QThreadPool>
 
+#include <functional>
+
 #include "PlaylistModel.h"   // Track
+
+class QTimer;
 
 // Owns the SQLite track database and the folder scan. Designed to live on a
 // dedicated worker thread: every method that touches the DB or filesystem runs
@@ -59,6 +63,26 @@ public slots:
     // never touched by the folder scan/prune. Emits libraryLoaded when done.
     void importTracks(const QList<Track> &tracks);
 
+    // --- Resumable imports (imports_resume table) -------------------------------
+    // An import is two phases: the Importer enumerates a source into per-entry page
+    // URLs, then hydrates each into a remote Track. These slots own the persisted
+    // resume state so a track-insert and its resume-row clearing commit atomically,
+    // and an interrupted import picks back up on the next launch.
+
+    // Record one import job: a pending resume row per entry. createName/appendName
+    // capture the playlist intent so it survives a restart.
+    void beginImportJob(const QString &jobId, const QString &createName,
+                        const QString &appendName, const QStringList &entryUrls);
+    // One hydrated entry: upsert the track and mark its resume row imported, in a
+    // single transaction. Finalizes the job once no pending rows remain.
+    void commitImportedTrack(const QString &jobId, const QString &entryUrl,
+                             const Track &track);
+    // Entries that produced nothing on a hydration pass: bump their attempt count;
+    // drop (and log) any that hit the retry cap so they can't loop forever.
+    void failImportEntries(const QString &jobId, const QStringList &entryUrls);
+    // On startup: replay any leftover pending rows (resumeImportJob per job).
+    void loadPendingImports();
+
 signals:
     void libraryLoaded(const QList<Track> &tracks);   // full replace (cache + final)
     void tracksAppended(const QList<Track> &tracks);  // incremental, during cold scan
@@ -68,9 +92,21 @@ signals:
     void artResolved(const QString &path, const QString &artUrl);
     void searchResults(const QString &query, const QList<Track> &tracks);
 
+    // Resume one interrupted job: the Importer re-hydrates the pending entry URLs.
+    void resumeImportJob(const QString &jobId, const QString &createName,
+                         const QString &appendName, const QStringList &entryUrls);
+    // A job's last entry cleared: the tracks (url-only is enough) plus the playlist
+    // intent, so the caller writes/appends the m3u8 and notifies — once per job.
+    void importJobFinished(const QString &createName, const QString &appendName,
+                           const QList<Track> &tracks);
+    void importEntriesDropped(int count);   // entries given up on (toast)
+
 private:
     bool ensureDb();
     void createTracksTable();   // uri-keyed schema
+    void createImportsTable();  // imports_resume (additive; no schema-version bump)
+    void finalizeImportJobIfDone(const QString &jobId);   // emit + clear when drained
+    void scheduleImportRefresh();   // debounced libraryLoaded during a busy import
     void createFtsSchema();     // FTS5 index + sync triggers (shared with rebuild)
     void rebuildSchema(int fromVersion);          // drop + recreate, salvaging remotes
     QList<Track> salvageRemoteRows();             // read remote rows before a rebuild
@@ -88,6 +124,10 @@ private:
     bool m_opened = false;
     bool m_scanning = false;   // re-entrancy guard while pumping events mid-scan
     QList<Track> m_pendingImports;   // importTracks() calls deferred while scanning
+    // Resume-table ops that arrived mid-scan (their transactions would nest inside
+    // the scan's). Replayed in order once the scan's transaction closes.
+    QList<std::function<void()>> m_deferredImports;
+    QTimer *m_importRefreshTimer = nullptr;   // coalesces libraryLoaded during import
     QAtomicInt m_cancel{0};
     QThreadPool m_pool;   // dedicated pool for parsing; cap set per scan
 };

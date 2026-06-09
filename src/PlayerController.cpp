@@ -125,6 +125,8 @@ PlayerController::PlayerController(QObject *parent)
     // current track (the user may have skipped while yt-dlp was running).
     connect(m_resolver, &RemoteResolver::resolved, this,
             [this](const QUrl &pageUrl, const QUrl &streamUrl) {
+                // Keep the "fetching" hint up through the engine opening/buffering the
+                // stream URL; it clears when playback actually starts (or on skip).
                 if (hasTrack() && m_current.url == pageUrl)
                     emit engineLoad(streamUrl, /*autoplay=*/true);
             });
@@ -149,6 +151,7 @@ void PlayerController::onPlaybackStateChanged(QMediaPlayer::PlaybackState s)
     if (s == QMediaPlayer::PlayingState) {
         m_consecutiveErrors = 0;   // a track played -> chain is healthy
         m_lastErrorUrl = QUrl{};
+        emit remoteResolving(false);   // stream is open and playing; drop the fetch hint
     }
     emit playbackStateChanged(s == QMediaPlayer::PlayingState);
 }
@@ -164,6 +167,7 @@ void PlayerController::playInternal(int qindex)
     qInfo().noquote() << QStringLiteral("[play] %1%2")
                              .arg(t.displayText(),
                                   t.isRemote() ? QStringLiteral(" (remote)") : QString());
+    emit remoteResolving(t.isRemote());   // show the fetch hint for remote; clear for local
     if (t.isRemote())
         m_resolver->resolve(t.url);   // engineLoad fires once the stream resolves
     else
@@ -429,6 +433,7 @@ void PlayerController::skipBadTrack(const QString &message)
     if (!hasTrack() || m_current.url == m_lastErrorUrl)
         return;
     m_lastErrorUrl = m_current.url;
+    emit remoteResolving(false);   // drop the fetch hint (next track will re-show if remote)
 
     qWarning().noquote() << QStringLiteral("[play] skipping '%1' — %2")
                                 .arg(m_current.title, message);

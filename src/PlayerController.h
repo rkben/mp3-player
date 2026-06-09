@@ -86,6 +86,10 @@ signals:
     void queueChanged(const QList<Track> &queue);    // queue contents changed
     void trackError(const QString &trackName, const QString &message);
     void playbackStateChanged(bool playing);
+    // True while yt-dlp is resolving a remote track's stream URL (which can take a
+    // second); false once it resolves/fails or a local track is loaded. Drives a
+    // "Fetching remote track…" status hint.
+    void remoteResolving(bool active);
     void positionChanged(qint64 ms);
     void durationChanged(qint64 ms);
     void volumeChanged(float linear);

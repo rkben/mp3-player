@@ -13,7 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QCryptographicHash>
-#include <QSet>
+#include <QUuid>
 #include <QUrl>
 
 namespace {
@@ -47,11 +47,53 @@ Source detectSource(const QString &page, const QString &extractorKey)
     return Source::Generic;
 }
 
+// Map one --dump-json object to a Track's metadata (identity is set by the caller to
+// the resume entry URL). Artist mapping is per-source (see notes/new_remote_sources.md):
+//  - YouTube: `uploader`/`channel` is the channel, not the performer — only the
+//    `artist` field (present on music tracks) is meaningful; else leave unset.
+//  - Mixcloud/ReverbNation: the uploader *is* the artist (DJ sets / the song's artist
+//    page); Mixcloud's own `artist` tag is redundant, so prefer uploader.
+//  - HearThis: no reliable artist/uploader — leave unset rather than guess.
+//  - Generic: the uploader/channel/creator fallback chain.
+Track trackFromJson(const QJsonObject &o, const QString &page)
+{
+    Track t;
+    const QString extractorKey = o.value(QLatin1String("extractor_key")).toString();
+    switch (detectSource(page, extractorKey)) {
+    case Source::Youtube:
+        t.artist = o.value(QLatin1String("artist")).toString().trimmed();
+        break;
+    case Source::Mixcloud:
+    case Source::ReverbNation:
+        t.artist = firstOf(o, {"uploader", "artist"});
+        break;
+    case Source::HearThis:
+        t.artist.clear();
+        break;
+    case Source::Generic:
+        t.artist = firstOf(o, {"artist", "uploader", "channel", "creator"});
+        break;
+    }
+    t.album = firstOf(o, {"album", "playlist", "playlist_title"});
+    if (t.album.isEmpty())
+        t.album = QStringLiteral("_unknown");
+    t.title = firstOf(o, {"track", "title", "fulltitle"});
+    if (t.title.isEmpty())
+        t.title = page;
+    t.durationMs = qint64(o.value(QLatin1String("duration")).toDouble() * 1000.0);
+    const int ry = o.value(QLatin1String("release_year")).toInt();
+    if (ry > 0)
+        t.year = ry;
+    else
+        t.year = firstOf(o, {"upload_date"}).left(4).toInt();   // YYYYMMDD -> YYYY
+    return t;
+}
+
 // yt-dlp emits no JSON for a DRM-protected entry, only one
 // "ERROR: [soundcloud] <id>: This video is DRM protected" line on stderr (one per
-// track, even inside an album/playlist run). Split stderr into a DRM-protected
-// count and the remaining genuine ERROR lines so we can collapse the (often many)
-// DRM rejections into a single readable toast.
+// track, even inside an album/playlist run). Split stderr into a DRM-protected count
+// and the remaining genuine ERROR lines so we can collapse the (often many) DRM
+// rejections into a single readable toast.
 struct ErrorSummary {
     int drmCount = 0;
     QStringList others;
@@ -82,34 +124,185 @@ Importer::Importer(QObject *parent)
 void Importer::start(const QString &url, bool createPlaylist,
                      const QString &appendPlaylist)
 {
-    if (m_busy)
+    Job job;
+    job.jobId = QUuid::createUuid().toString(QUuid::Id128);
+    job.sourceUrl = url;
+    job.createPlaylist = createPlaylist;
+    job.appendName = appendPlaylist;
+    job.needEnumerate = true;
+    enqueue(std::move(job));
+}
+
+void Importer::resumeImportJob(const QString &jobId, const QString &createName,
+                               const QString &appendName, const QStringList &entryUrls)
+{
+    if (entryUrls.isEmpty())
+        return;
+    Job job;
+    job.jobId = jobId;
+    job.createName = createName;
+    job.appendName = appendName;
+    job.entryUrls = entryUrls;
+    job.needEnumerate = false;
+    job.fromResume = true;
+    enqueue(std::move(job));
+}
+
+void Importer::enqueue(Job job)
+{
+    m_queue.enqueue(std::move(job));
+    pump();
+}
+
+void Importer::pump()
+{
+    if (m_running || m_queue.isEmpty())
         return;
     const QString exe = RemoteResolver::ytDlpPath();
     if (exe.isEmpty()) {
-        emit failed(tr("yt-dlp not found — set its path in Settings"));
+        // Drain the queue: without yt-dlp nothing can proceed. Only fresh jobs warrant
+        // a notification (a resume should stay quiet and just wait for a future launch).
+        Job job = m_queue.dequeue();
+        if (!job.fromResume)
+            emit failed(tr("yt-dlp not found — set its path in Settings"));
+        pump();
         return;
     }
 
-    reset();
-    m_busy = true;
-    m_createPlaylist = createPlaylist;
-    m_appendPlaylist = appendPlaylist;
+    m_cur = m_queue.dequeue();
+    m_running = true;
+    m_partial.clear();
+    m_enumEntries.clear();
+    m_enumPlaylistTitle.clear();
+    m_pending.clear();
+    m_committed = 0;
+    m_pendingCovers = 0;
+    m_hydrateProcDone = false;
 
-    qInfo().noquote() << QStringLiteral("[import] start %1").arg(url);
-    emit status(tr("Importing… %1").arg(url));
-
-    m_proc = new QProcess(this);
-    connect(m_proc, &QProcess::readyReadStandardOutput, this, &Importer::onStdout);
-    // QProcess::finished passes (int, ExitStatus); the slot ignores both.
-    connect(m_proc, &QProcess::finished, this, &Importer::onProcessFinished);
-    // --dump-json: one JSON object per entry. --ignore-errors so a single bad
-    // entry (e.g. DRM on SoundCloud) doesn't abort a whole playlist.
-    suppressConsoleWindow(m_proc);
-    m_proc->start(exe, {QStringLiteral("--dump-json"), QStringLiteral("--no-warnings"),
-                        QStringLiteral("--ignore-errors"), url});
+    if (m_cur.needEnumerate)
+        startEnumerate();
+    else
+        startHydrate();
 }
 
-void Importer::onStdout()
+void Importer::clearProc()
+{
+    if (m_proc) {
+        m_proc->disconnect(this);
+        m_proc->deleteLater();
+        m_proc = nullptr;
+    }
+    m_partial.clear();
+}
+
+// --- Phase 1: enumerate ------------------------------------------------------------
+
+void Importer::startEnumerate()
+{
+    qInfo().noquote() << QStringLiteral("[import] enumerate %1").arg(m_cur.sourceUrl);
+    emit status(tr("Reading %1…").arg(m_cur.sourceUrl));
+
+    m_proc = new QProcess(this);
+    connect(m_proc, &QProcess::readyReadStandardOutput, this, &Importer::onEnumerateStdout);
+    connect(m_proc, &QProcess::finished, this, &Importer::onEnumerateFinished);
+    suppressConsoleWindow(m_proc);
+    // --flat-playlist: list entries without extracting each — cheap and fast. JSON per
+    // entry carries its page URL (and the playlist title for the create-name).
+    m_proc->start(RemoteResolver::ytDlpPath(),
+                  {QStringLiteral("--flat-playlist"), QStringLiteral("--dump-json"),
+                   QStringLiteral("--no-warnings"), QStringLiteral("--ignore-errors"),
+                   m_cur.sourceUrl});
+}
+
+void Importer::onEnumerateStdout()
+{
+    m_partial += m_proc->readAllStandardOutput();
+    int nl;
+    while ((nl = m_partial.indexOf('\n')) >= 0) {
+        const QByteArray line = m_partial.left(nl);
+        m_partial.remove(0, nl + 1);
+        if (line.trimmed().isEmpty())
+            continue;
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject())
+            continue;
+        const QJsonObject o = doc.object();
+        const QString url = firstOf(o, {"url", "webpage_url", "original_url"});
+        if (!url.isEmpty() && !m_enumEntries.contains(url))
+            m_enumEntries << url;
+        if (m_enumPlaylistTitle.isEmpty())
+            m_enumPlaylistTitle = firstOf(o, {"playlist_title", "playlist", "title"});
+    }
+}
+
+void Importer::onEnumerateFinished()
+{
+    onEnumerateStdout();   // drain the tail (last line may lack a trailing newline)
+    if (!m_partial.trimmed().isEmpty()) {
+        // A final object without a newline: parse it directly.
+        m_partial += '\n';
+        onEnumerateStdout();
+    }
+    const QString errText = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
+
+    if (m_enumEntries.isEmpty()) {
+        const QString why = errText.isEmpty() ? tr("yt-dlp returned nothing")
+                                              : errText.section('\n', 0, 0);
+        qWarning().noquote() << QStringLiteral("[import] enumerate failed — %1").arg(why);
+        clearProc();
+        emit status(QString());
+        if (!m_cur.fromResume)
+            emit failed(why);
+        m_running = false;
+        pump();
+        return;
+    }
+
+    if (m_cur.createPlaylist)
+        m_cur.createName = m_enumPlaylistTitle.isEmpty() ? tr("Imported")
+                                                         : m_enumPlaylistTitle;
+    m_cur.entryUrls = m_enumEntries;
+    qInfo("[import] enumerated %lld entry(ies) for job %s",
+          static_cast<long long>(m_cur.entryUrls.size()), qPrintable(m_cur.jobId));
+
+    // Persist the resume rows before hydrating; commits land after via queued signals.
+    emit enumerated(m_cur.jobId, m_cur.createName, m_cur.appendName, m_cur.entryUrls);
+
+    clearProc();
+    startHydrate();
+}
+
+// --- Phase 2: hydrate --------------------------------------------------------------
+
+void Importer::startHydrate()
+{
+    m_pending = QSet<QString>(m_cur.entryUrls.cbegin(), m_cur.entryUrls.cend());
+    m_seenUris.clear();
+    m_committed = 0;
+    m_pendingCovers = 0;
+    m_hydrateProcDone = false;
+
+    m_proc = new QProcess(this);
+    connect(m_proc, &QProcess::readyReadStandardOutput, this, &Importer::onHydrateStdout);
+    connect(m_proc, &QProcess::finished, this, &Importer::onHydrateFinished);
+    // Feed the entry URLs once the process is up (don't block the GUI thread waiting).
+    connect(m_proc, &QProcess::started, this, [this] {
+        m_proc->write(m_cur.entryUrls.join('\n').toUtf8());
+        m_proc->write("\n");
+        m_proc->closeWriteChannel();
+    });
+    suppressConsoleWindow(m_proc);
+    // --dump-json over the pending entry URLs, fed on stdin via --batch-file - so a
+    // huge playlist can't blow ARG_MAX. --ignore-errors so one bad entry (e.g. DRM)
+    // doesn't abort the rest; those simply produce no JSON and are retried/dropped.
+    m_proc->start(RemoteResolver::ytDlpPath(),
+                  {QStringLiteral("--dump-json"), QStringLiteral("--no-warnings"),
+                   QStringLiteral("--ignore-errors"),
+                   QStringLiteral("--batch-file"), QStringLiteral("-")});
+}
+
+void Importer::onHydrateStdout()
 {
     m_partial += m_proc->readAllStandardOutput();
     int nl;
@@ -117,11 +310,11 @@ void Importer::onStdout()
         const QByteArray line = m_partial.left(nl);
         m_partial.remove(0, nl + 1);
         if (!line.trimmed().isEmpty())
-            parseLine(line);
+            parseHydratedLine(line);
     }
 }
 
-void Importer::parseLine(const QByteArray &line)
+void Importer::parseHydratedLine(const QByteArray &line)
 {
     QJsonParseError err;
     const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
@@ -129,86 +322,99 @@ void Importer::parseLine(const QByteArray &line)
         return;   // non-JSON progress/noise line
     const QJsonObject o = doc.object();
 
-    Track t;
+    // The track's own page is its identity; yt-dlp echoes the URL we fed as
+    // original_url, which ties it back to a resume row (its entry). One fed entry can
+    // be a sub-playlist that hydrates into several tracks — all share that original_url.
     const QString page = firstOf(o, {"webpage_url", "original_url", "url"});
     if (page.isEmpty())
         return;
-    t.url = QUrl(page);
-    // Some extractors (e.g. archive.org) give every entry the same webpage_url;
-    // keep the per-entry direct media URL to disambiguate identities below.
-    m_directUrls.append(o.value(QLatin1String("url")).toString());
-
-    // Artist mapping is per-source (see notes/new_remote_sources.md):
-    //  - YouTube: `uploader`/`channel` is the channel, not the performer — only the
-    //    `artist` field (present on music tracks) is meaningful; else leave unset.
-    //  - Mixcloud/ReverbNation: the uploader *is* the artist (DJ sets / the song's
-    //    artist page); Mixcloud's own `artist` tag is redundant, so prefer uploader.
-    //  - HearThis: no reliable artist/uploader — leave unset rather than guess.
-    //  - Generic: the uploader/channel/creator fallback chain.
-    const QString extractorKey = o.value(QLatin1String("extractor_key")).toString();
-    switch (detectSource(page, extractorKey)) {
-    case Source::Youtube:
-        t.artist = o.value(QLatin1String("artist")).toString().trimmed();
-        break;
-    case Source::Mixcloud:
-    case Source::ReverbNation:
-        t.artist = firstOf(o, {"uploader", "artist"});
-        break;
-    case Source::HearThis:
-        t.artist.clear();
-        break;
-    case Source::Generic:
-        t.artist = firstOf(o, {"artist", "uploader", "channel", "creator"});
-        break;
+    QString entry = firstOf(o, {"original_url"});
+    if (!m_pending.contains(entry)) {
+        const QString wp = firstOf(o, {"webpage_url"});
+        if (m_pending.contains(wp))
+            entry = wp;
     }
-    t.album = firstOf(o, {"album", "playlist", "playlist_title"});
-    if (t.album.isEmpty())
-        t.album = QStringLiteral("_unknown");
-    t.title = firstOf(o, {"track", "title", "fulltitle"});
-    if (t.title.isEmpty())
-        t.title = page;
-    t.durationMs = qint64(o.value(QLatin1String("duration")).toDouble() * 1000.0);
-    const int ry = o.value(QLatin1String("release_year")).toInt();
-    if (ry > 0)
-        t.year = ry;
-    else
-        t.year = firstOf(o, {"upload_date"}).left(4).toInt();   // YYYYMMDD -> YYYY
+    if (entry.isEmpty())
+        entry = page;
 
-    m_tracks.append(t);
-    m_thumbs.append(firstOf(o, {"thumbnail"}));
+    Track t = trackFromJson(o, page);
+    t.url = QUrl(page);
+    // Some sources (archive.org) give every track the same webpage_url; fall back to
+    // the per-track direct URL so distinct tracks don't collide on the uri key.
+    if (m_seenUris.contains(t.key())) {
+        const QString direct = o.value(QLatin1String("url")).toString();
+        if (!direct.isEmpty())
+            t.url = QUrl(direct);
+    }
+    m_seenUris.insert(t.key());
+    m_pending.remove(entry);   // entry satisfied (extra tracks of a set still import)
 
-    if (m_playlistTitle.isEmpty())
-        m_playlistTitle = firstOf(o, {"playlist_title", "playlist"});
-    const QString pl = m_playlistTitle.isEmpty() ? tr("import") : m_playlistTitle;
+    const QString pl = m_cur.createName.isEmpty()
+                           ? (m_enumPlaylistTitle.isEmpty() ? tr("import") : m_enumPlaylistTitle)
+                           : m_cur.createName;
+    emit status(tr("Importing from %1 (%L2/%L3): %4")
+                    .arg(pl).arg(m_committed + 1).arg(m_cur.entryUrls.size()).arg(t.title));
 
-    // yt-dlp tags each playlist entry with its 1-based index and the total count;
-    // both are absent for a single non-playlist URL, where we fall back to the
-    // running parsed count (total unknown).
-    const int total = o.value(QLatin1String("playlist_count")).toInt(
-                          o.value(QLatin1String("n_entries")).toInt());
-    const int index = o.value(QLatin1String("playlist_index")).toInt(m_tracks.size());
-    if (total > 0)
-        emit status(tr("Importing from %1 (%L2/%L3): %4")
-                        .arg(pl).arg(index).arg(total).arg(t.title));
-    else
-        emit status(tr("Importing from %1 (%L2): %3").arg(pl).arg(index).arg(t.title));
+    startCover(entry, t, firstOf(o, {"thumbnail"}));
 }
 
-void Importer::onProcessFinished()
+void Importer::startCover(const QString &entryUrl, Track track, const QString &thumb)
 {
-    // Drain any stdout not yet delivered and flush the final line — yt-dlp's last
-    // JSON object may arrive with/after finished, or without a trailing newline,
-    // and onStdout only parses newline-terminated lines. Without this the last
-    // track is silently dropped.
-    m_partial += m_proc->readAllStandardOutput();
-    for (const QByteArray &line : m_partial.split('\n'))
-        if (!line.trimmed().isEmpty())
-            parseLine(line);
+    if (thumb.isEmpty()) {
+        emitImported(entryUrl, track);
+        return;
+    }
+    const QString suffix = QFileInfo(QUrl(thumb).path()).suffix().toLower();
+    const QString ext = suffix == QLatin1String("png") ? QStringLiteral("png")
+                                                       : QStringLiteral("jpg");
+    const QString key = QCryptographicHash::hash(thumb.toUtf8(),
+                            QCryptographicHash::Sha1).toHex();
+    const QString out = m_artDir + '/' + key + '.' + ext;
+    if (QFileInfo::exists(out)) {   // cached already
+        track.artUrl = QUrl::fromLocalFile(out).toString();
+        emitImported(entryUrl, track);
+        return;
+    }
+    QDir().mkpath(m_artDir);
+    ++m_pendingCovers;
+    QNetworkReply *reply = m_net->get(QNetworkRequest(QUrl(thumb)));
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, out, entryUrl, track]() mutable {
+        if (reply->error() == QNetworkReply::NoError) {
+            const QByteArray data = reply->readAll();
+            QFile f(out);
+            if (!data.isEmpty() && f.open(QIODevice::WriteOnly)) {
+                f.write(data);
+                f.close();
+                track.artUrl = QUrl::fromLocalFile(out).toString();
+            }
+        }
+        reply->deleteLater();
+        --m_pendingCovers;
+        emitImported(entryUrl, track);
+        finishHydratePassIfReady();
+    });
+}
+
+void Importer::emitImported(const QString &entryUrl, const Track &track)
+{
+    // entryUrl ties the track to its resume row (already removed from m_pending at parse
+    // time). The store clears/records the row; a sub-playlist's extra tracks reuse the
+    // same entryUrl and the store files them on their own done rows.
+    ++m_committed;
+    emit trackImported(m_cur.jobId, entryUrl, track);
+}
+
+void Importer::onHydrateFinished()
+{
+    onHydrateStdout();   // drain whatever stdout hasn't been delivered yet
+    if (!m_partial.trimmed().isEmpty()) {
+        m_partial += '\n';
+        onHydrateStdout();
+    }
     m_partial.clear();
 
-    // Surface any errors yt-dlp wrote as a single toast rather than one per stderr
-    // line. DRM-protected entries (SoundCloud Go+) are collapsed into one count —
-    // an all-DRM album would otherwise produce dozens of identical lines.
+    // Collapse stderr into a single toast (DRM rejections counted, not one line each).
     const QString errText = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
     const ErrorSummary errs = summarizeErrors(errText);
     QStringList toast;
@@ -221,106 +427,32 @@ void Importer::onProcessFinished()
         emit trackFailed(toast.join('\n'));
     }
 
-    if (m_tracks.isEmpty()) {
-        QString why;
-        if (errs.drmCount > 0 && errs.others.isEmpty())
-            why = tr("All tracks are DRM-protected and can't be imported");
-        else if (!errs.others.isEmpty())
-            why = errs.others.first();
-        else
-            why = errText.isEmpty() ? tr("yt-dlp returned nothing")
-                                    : errText.section('\n', 0, 0);
-        qWarning().noquote() << QStringLiteral("[import] failed — %1").arg(why);
-        reset();
-        emit failed(why);
-        return;
-    }
-
-    // Disambiguate identities: if an entry's page URL repeats (archive.org gives
-    // every track the same details page), fall back to its unique direct URL so
-    // the rows don't collide on the uri primary key.
-    QSet<QString> seen;
-    for (int i = 0; i < m_tracks.size(); ++i) {
-        QString key = m_tracks[i].url.toString();
-        if (seen.contains(key) && !m_directUrls.at(i).isEmpty()) {
-            m_tracks[i].url = QUrl(m_directUrls.at(i));
-            key = m_tracks[i].url.toString();
-        }
-        seen.insert(key);
-    }
-
-    startCoverDownloads();
+    m_hydrateProcDone = true;
+    finishHydratePassIfReady();
 }
 
-void Importer::startCoverDownloads()
+void Importer::finishHydratePassIfReady()
 {
-    QDir().mkpath(m_artDir);
-    m_pendingCovers = 0;
-    for (int i = 0; i < m_tracks.size(); ++i) {
-        const QString thumb = m_thumbs.at(i);
-        if (thumb.isEmpty())
-            continue;
-        const QString suffix = QFileInfo(QUrl(thumb).path()).suffix().toLower();
-        const QString ext = suffix == QLatin1String("png") ? QStringLiteral("png")
-                                                           : QStringLiteral("jpg");
-        const QString key = QCryptographicHash::hash(thumb.toUtf8(),
-                                QCryptographicHash::Sha1).toHex();
-        const QString out = m_artDir + '/' + key + '.' + ext;
-        if (QFileInfo::exists(out)) {   // cached already
-            m_tracks[i].artUrl = QUrl::fromLocalFile(out).toString();
-            continue;
-        }
-        ++m_pendingCovers;
-        QNetworkReply *reply = m_net->get(QNetworkRequest(QUrl(thumb)));
-        connect(reply, &QNetworkReply::finished, this, [this, reply, out, i] {
-            if (reply->error() == QNetworkReply::NoError) {
-                const QByteArray data = reply->readAll();
-                QFile f(out);
-                if (!data.isEmpty() && f.open(QIODevice::WriteOnly)) {
-                    f.write(data);
-                    f.close();
-                    m_tracks[i].artUrl = QUrl::fromLocalFile(out).toString();
-                }
-            }
-            reply->deleteLater();
-            finishCover();
-        });
+    if (!m_hydrateProcDone || m_pendingCovers > 0)
+        return;   // still draining covers
+
+    // Anything still pending produced no JSON this pass: bump its attempt count (the
+    // store drops it after the retry cap). Leftovers are retried on the next launch.
+    if (!m_pending.isEmpty()) {
+        const QStringList failedEntries(m_pending.cbegin(), m_pending.cend());
+        emit importEntriesFailed(m_cur.jobId, failedEntries);
     }
-    if (m_pendingCovers == 0)
-        finalize();
-}
 
-void Importer::finishCover()
-{
-    if (--m_pendingCovers <= 0)
-        finalize();
-}
+    qInfo("[import] hydrate pass for job %s — %d imported, %lld left pending",
+          qPrintable(m_cur.jobId), m_committed, static_cast<long long>(m_pending.size()));
 
-void Importer::finalize()
-{
-    const QList<Track> tracks = m_tracks;
-    // Resolve the create-name from the source title now (empty if not creating).
-    QString createName;
-    if (m_createPlaylist)
-        createName = m_playlistTitle.isEmpty() ? tr("Imported") : m_playlistTitle;
-    const QString append = m_appendPlaylist;
-    qInfo("[import] finished — %lld track(s)%s",
-          static_cast<long long>(tracks.size()),
-          createName.isEmpty() ? "" : qPrintable(QStringLiteral(" -> new playlist '%1'")
-                                                      .arg(createName)));
-    reset();
+    // A user-started job that imported nothing at all warrants a notification; a
+    // background resume stays quiet and simply retries next time.
+    if (m_committed == 0 && !m_cur.fromResume)
+        emit failed(tr("Nothing could be imported from this source"));
+
+    clearProc();
     emit status(QString());   // clear the status bar
-    emit finished(tracks, createName, append);
-}
-
-void Importer::reset()
-{
-    if (m_proc) { m_proc->deleteLater(); m_proc = nullptr; }
-    m_partial.clear();
-    m_tracks.clear();
-    m_thumbs.clear();
-    m_directUrls.clear();
-    m_playlistTitle.clear();
-    m_pendingCovers = 0;
-    m_busy = false;
+    m_running = false;
+    pump();
 }
