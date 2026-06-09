@@ -47,21 +47,27 @@ I haven't read most of this, initially an experiment and turned out okay.
 
 ## Images
 app
+
 ![Pocket Player - KDE native theme](_img/app.png)
 
 theme example
+
 ![Included Dark theme example](_img/app_themed.png)
 
 general settings
+
 ![Settings - General](_img/settings.png)
 
 library settings
+
 ![Settings - Library](_img/setting_library.png)
 
 playlist importer
+
 ![Playlist - Import](_img/playlist_import.png)
 
 playlist editor
+
 ![Playlist - Editor](_img/playlist_editor.png)
 
 ## Build
