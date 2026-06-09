@@ -23,6 +23,13 @@ public:
         rescale();
     }
 
+    // A pixmap QLabel normally reports its pixmap size as the minimum, which floors how
+    // far the panel/app can shrink horizontally. The art rescales to whatever space it
+    // gets (see rescale()), so it needs no intrinsic minimum — let the layout shrink it.
+    // (Vertical floor still comes from setMinimumHeight() on the widget.)
+    QSize minimumSizeHint() const override { return QSize(0, 0); }
+    QSize sizeHint() const override { return QSize(0, 0); }
+
 protected:
     void resizeEvent(QResizeEvent *event) override
     {

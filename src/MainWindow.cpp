@@ -507,16 +507,20 @@ QWidget *MainWindow::buildQueuePanel()
     m_table->verticalHeader()->setDefaultSectionSize(26);
     QHeaderView *hh = m_table->horizontalHeader();
     hh->setHighlightSections(false);
-    // Every column user-resizable (Stretch/ResizeToContents would lock the width
-    // so only one column dragged). The last section stretches to fill the panel.
+    // Title absorbs the slack (Stretch) so the narrow, bounded columns (year=4 digits,
+    // track no.=4, duration=H:MM:SS) keep tidy fixed-ish widths instead of one of them
+    // stretching. The rest stay Interactive (user-draggable); Title isn't draggable
+    // directly but just takes whatever's left. NOTE: the header layout (widths + sort)
+    // is persisted via ui/tableHeader (saveState) and reapplied in restoreUiState — so
+    // these defaults only apply to fresh state; restoreUiState re-asserts the modes.
     hh->setSectionResizeMode(QHeaderView::Interactive);
-    hh->setStretchLastSection(true);
-    hh->resizeSection(PlaylistModel::Title,    220);
-    hh->resizeSection(PlaylistModel::Artist,   150);
+    hh->setSectionResizeMode(PlaylistModel::Title, QHeaderView::Stretch);
+    hh->setStretchLastSection(false);
+    hh->resizeSection(PlaylistModel::Artist,   160);
     hh->resizeSection(PlaylistModel::Album,    180);
-    hh->resizeSection(PlaylistModel::Year,     56);
-    hh->resizeSection(PlaylistModel::TrackNo,  44);
-    hh->resizeSection(PlaylistModel::Duration, 64);
+    hh->resizeSection(PlaylistModel::Year,      60);
+    hh->resizeSection(PlaylistModel::TrackNo,   56);
+    hh->resizeSection(PlaylistModel::Duration,  76);
     m_table->sortByColumn(-1, Qt::AscendingOrder);   // default: keep DB/result order
     // Only doubleClicked — `activated` also fires on a double-click (and on Enter),
     // so connecting both ran the handler twice per double-click.
@@ -1254,11 +1258,12 @@ void MainWindow::restoreUiState()
     if (s.contains("ui/tableHeader")) {
         QHeaderView *hh = m_table->horizontalHeader();
         hh->restoreState(s.value("ui/tableHeader").toByteArray());
-        // restoreState() also restores per-section resize *modes*, which would
-        // bring back an old non-resizable (Stretch) config. Re-assert Interactive
-        // so every column stays user-draggable; the restored widths are kept.
+        // restoreState() also restores per-section resize *modes* (and an old
+        // stretch-last-section config). Re-assert our scheme: every column draggable
+        // except Title, which stretches to absorb the slack. Restored widths are kept.
         hh->setSectionResizeMode(QHeaderView::Interactive);
-        hh->setStretchLastSection(true);
+        hh->setSectionResizeMode(PlaylistModel::Title, QHeaderView::Stretch);
+        hh->setStretchLastSection(false);
     }
 }
 
