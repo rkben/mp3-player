@@ -182,8 +182,12 @@ void Importer::enqueue(Job job)
 
 void Importer::pump()
 {
-    if (m_running || m_queue.isEmpty())
+    if (m_running)
         return;
+    if (m_queue.isEmpty()) {
+        setActive(false);   // nothing running and nothing queued: idle
+        return;
+    }
     const QString exe = YtDlp::path();
     if (exe.isEmpty()) {
         // Drain the queue: without yt-dlp nothing can proceed. Only fresh jobs warrant
@@ -197,6 +201,8 @@ void Importer::pump()
 
     m_cur = m_queue.dequeue();
     m_running = true;
+    m_cancelled = false;
+    setActive(true);
     m_partial.clear();
     m_enumPlaylistTitle = m_cur.playlistTitle;   // known up-front on the pre-enumerated path
     m_pending.clear();
@@ -220,6 +226,35 @@ void Importer::clearProc()
         m_proc = nullptr;
     }
     m_partial.clear();
+}
+
+void Importer::setActive(bool active)
+{
+    if (active == m_active)
+        return;
+    m_active = active;
+    emit importActiveChanged(active);
+}
+
+void Importer::cancelAll()
+{
+    m_cancelled = true;          // suppress any late cover-completion commits
+    m_queue.clear();
+    m_enumDlp.cancel();
+    if (m_proc)
+        m_proc->kill();          // clearProc() disconnects + deleteLater (kills on destroy)
+    clearProc();
+    for (QNetworkReply *r : m_coverReplies) {
+        r->disconnect(this);
+        r->abort();
+        r->deleteLater();
+    }
+    m_coverReplies.clear();
+    m_pendingCovers = 0;
+    m_running = false;
+    emit status(QString());      // drop the "Importing…" line
+    setActive(false);
+    qInfo("[import] cancelled");
 }
 
 // --- Phase 1: enumerate ------------------------------------------------------------
@@ -388,8 +423,13 @@ void Importer::startCover(const QString &entryUrl, Track track, const QString &t
     QDir().mkpath(m_artDir);
     ++m_pendingCovers;
     QNetworkReply *reply = m_net->get(QNetworkRequest(QUrl(thumb)));
+    m_coverReplies.insert(reply);
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, out, entryUrl, track]() mutable {
+        m_coverReplies.remove(reply);
+        reply->deleteLater();
+        if (m_cancelled)
+            return;   // import was cancelled while this cover was in flight
         if (reply->error() == QNetworkReply::NoError) {
             const QByteArray data = reply->readAll();
             QFile f(out);
@@ -399,7 +439,6 @@ void Importer::startCover(const QString &entryUrl, Track track, const QString &t
                 track.artUrl = QUrl::fromLocalFile(out).toString();
             }
         }
-        reply->deleteLater();
         --m_pendingCovers;
         emitImported(entryUrl, track);
         finishHydratePassIfReady();
@@ -408,6 +447,8 @@ void Importer::startCover(const QString &entryUrl, Track track, const QString &t
 
 void Importer::emitImported(const QString &entryUrl, const Track &track)
 {
+    if (m_cancelled)
+        return;   // don't persist a track after cancel (would re-create a resume row)
     // entryUrl ties the track to its resume row (already removed from m_pending at parse
     // time). The store clears/records the row; a sub-playlist's extra tracks reuse the
     // same entryUrl and the store files them on their own done rows.
@@ -443,6 +484,8 @@ void Importer::onHydrateFinished()
 
 void Importer::finishHydratePassIfReady()
 {
+    if (m_cancelled)
+        return;   // cancelAll() already tore the pass down
     if (!m_hydrateProcDone || m_pendingCovers > 0)
         return;   // still draining covers
 

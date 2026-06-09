@@ -301,6 +301,18 @@ void MainWindow::startLibraryThread()
     connect(m_library, &MusicLibrary::resumeImportJob, m_importer, &Importer::resumeImportJob);
     connect(m_library, &MusicLibrary::importEntriesDropped, this,
             [](int n) { ToastArea::post(tr("%n track(s) couldn't be imported", nullptr, n)); });
+    // Cancel: show the ✕ only while an import runs; clear resume rows on the worker.
+    connect(m_importer, &Importer::importActiveChanged, this,
+            [this](bool active) { m_cancelImportBtn->setVisible(active); });
+    connect(this, &MainWindow::cancelImports, m_library, &MusicLibrary::cancelAllImports);
+    connect(m_library, &MusicLibrary::importsCancelled, this, [](int n, bool removed) {
+        if (n <= 0)
+            ToastArea::post(tr("Import cancelled."));
+        else if (removed)
+            ToastArea::post(tr("Import cancelled — removed %n track(s).", nullptr, n));
+        else
+            ToastArea::post(tr("Import stopped — kept %n track(s).", nullptr, n));
+    });
     connect(m_library, &MusicLibrary::importJobFinished, this,
             [this](const QString &createName, const QString &appendName,
                    const QList<Track> &tracks) {
@@ -438,13 +450,29 @@ void MainWindow::buildUi()
     root->addWidget(buildTransportBar());
 
     // --- Bottom status bar: only shown during background work (e.g. syncing) ---
+    // A horizontal row: the layered status text (stretch) + an inline ✕ that appears
+    // only while a remote import is running, to cancel it.
     m_status = new StatusStack;
     m_status->setObjectName("status");
     // Nudge the text right so it clears macOS's rounded bottom-left window corner.
     // Set in code (not just the Dark QSS) so it also applies under the native style.
     m_status->setContentsMargins(8, 0, 0, 0);
     m_status->hide();
-    root->addWidget(m_status);
+
+    m_cancelImportBtn = new QToolButton;
+    m_cancelImportBtn->setObjectName("cancelImport");
+    m_cancelImportBtn->setText(QStringLiteral("✕"));
+    m_cancelImportBtn->setAutoRaise(true);
+    m_cancelImportBtn->setToolTip(tr("Cancel import"));
+    m_cancelImportBtn->hide();
+    connect(m_cancelImportBtn, &QToolButton::clicked, this, &MainWindow::cancelActiveImport);
+
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    statusRow->setSpacing(0);
+    statusRow->addWidget(m_status, 1);
+    statusRow->addWidget(m_cancelImportBtn);
+    root->addLayout(statusRow);
 
     // In-app toast overlay: a transparent child spanning the window. Registers
     // itself so ToastArea::post() works from anywhere (incl. worker threads).
@@ -1865,6 +1893,25 @@ void MainWindow::importFromUrl()
                       dlg.playlistTitle());
     if (wasBusy)
         ToastArea::post(tr("Import queued — it'll start when the current one finishes."));
+}
+
+void MainWindow::cancelActiveImport()
+{
+    // Stop all import activity immediately (the ✕ hides via importActiveChanged), then
+    // ask what to do with the tracks already added this run.
+    m_importer->cancelAll();
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("Cancel import"));
+    box.setText(tr("Import cancelled."));
+    box.setInformativeText(tr("Keep the tracks already added to your library?"));
+    QPushButton *keep = box.addButton(tr("Keep"), QMessageBox::AcceptRole);
+    QPushButton *remove = box.addButton(tr("Remove"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(keep);
+    box.exec();   // Esc/close == keep (non-destructive)
+
+    emit cancelImports(box.clickedButton() == remove);
 }
 
 void MainWindow::onQueueChanged(const QList<Track> &queue)

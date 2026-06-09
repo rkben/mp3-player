@@ -87,6 +87,10 @@ public slots:
     // On startup: replay any leftover pending rows (resumeImportJob per job).
     void loadPendingImports();
 
+    // Cancel all imports: clear the resume table so nothing resumes; if removeTracks,
+    // also delete the tracks committed by those jobs (rollback). Emits importsCancelled.
+    void cancelAllImports(bool removeTracks);
+
 signals:
     void libraryLoaded(const QList<Track> &tracks);   // full replace (cache + final)
     void tracksAppended(const QList<Track> &tracks);  // incremental, during cold scan
@@ -104,6 +108,7 @@ signals:
     void importJobFinished(const QString &createName, const QString &appendName,
                            const QList<Track> &tracks);
     void importEntriesDropped(int count);   // entries given up on (toast)
+    void importsCancelled(int trackCount, bool removed);   // cancel done (toast)
 
 private:
     bool ensureDb();

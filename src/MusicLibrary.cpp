@@ -439,6 +439,40 @@ void MusicLibrary::removeTracks(const QStringList &uris)
     emit libraryLoaded(loadAll(nullptr));
 }
 
+void MusicLibrary::cancelAllImports(bool removeTracks)
+{
+    if (!ensureDb())
+        return;
+    if (m_scanning) {   // run after the scan's transaction (and any queued commits) close
+        m_deferredImports.append([=] { cancelAllImports(removeTracks); });
+        return;
+    }
+    // The tracks this import committed (track_uri is set on each imported row).
+    QStringList uris;
+    QSqlQuery sel(m_db);
+    if (sel.exec("SELECT DISTINCT track_uri FROM imports_resume WHERE track_uri IS NOT NULL"))
+        while (sel.next())
+            uris << sel.value(0).toString();
+
+    m_db.transaction();
+    if (removeTracks) {
+        QSqlQuery del(m_db);
+        del.prepare("DELETE FROM tracks WHERE uri=? AND remote=1");
+        for (const QString &u : uris) {
+            del.addBindValue(u);
+            del.exec();
+        }
+    }
+    QSqlQuery clr(m_db);   // cancel is global: drop every job's rows so nothing resumes
+    clr.exec("DELETE FROM imports_resume");
+    m_db.commit();
+
+    qInfo("[import] cancelled — %lld track(s) %s", static_cast<long long>(uris.size()),
+          removeTracks ? "removed" : "kept");
+    emit libraryLoaded(loadAll(nullptr));
+    emit importsCancelled(int(uris.size()), removeTracks);
+}
+
 void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
 {
     m_db.transaction();

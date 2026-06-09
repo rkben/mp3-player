@@ -53,6 +53,7 @@ signals:
                      const QString &album, int trackNo, qint64 durationMs);
     void importTracks(const QList<Track> &tracks);   // -> library worker
     void removeTracks(const QStringList &uris);      // -> library worker (Remote tree)
+    void cancelImports(bool removeTracks);           // -> library worker (clear resume)
 
 private slots:
     void openSettings(bool startOnLibrary = false);
@@ -66,6 +67,7 @@ private slots:
     void openPlaylistEditor(const QString &preselect = QString());
     void createPlaylist();     // Playlists tab: make a new empty playlist
     void importFromUrl();      // Playlists tab: yt-dlp import modal
+    void cancelActiveImport(); // status-row ✕: stop import, ask Keep/Remove
     void onCurrentTrackChanged(const Track &track);
     void onQueueChanged(const QList<Track> &queue);
     void onPlaybackStateChanged(bool playing);
@@ -159,6 +161,7 @@ private:
     QTimer *m_searchTimer;
     QTimer *m_queueCacheTimer;   // debounces the resumable queue-cache write
     StatusStack *m_status;   // layered status line (see StatusStack); post per slot
+    QToolButton *m_cancelImportBtn = nullptr;   // ✕ on the status row, shown while importing
     QSlider *m_seek;
     QLabel *m_elapsed;
     QLabel *m_total;

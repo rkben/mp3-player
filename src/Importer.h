@@ -10,6 +10,7 @@
 
 class QProcess;
 class QNetworkAccessManager;
+class QNetworkReply;
 
 // Background yt-dlp import, two-phase and resumable. A job is first *enumerated*
 // (`yt-dlp --flat-playlist`) into per-entry page URLs, then *hydrated* (one streaming
@@ -43,10 +44,16 @@ public slots:
     void resumeImportJob(const QString &jobId, const QString &createName,
                          const QString &appendName, const QStringList &entryUrls);
 
+    // Stop all import activity: kill the running yt-dlp processes + in-flight cover
+    // downloads and drop the queue. Resume rows are cleared separately by the caller
+    // (MusicLibrary::cancelAllImports), so a cancelled import doesn't come back.
+    void cancelAll();
+
 signals:
     void status(const QString &message);        // progress line for the status bar
     void trackFailed(const QString &message);   // single-entry problem (toast)
     void failed(const QString &message);        // nothing imported (OS notification)
+    void importActiveChanged(bool active);      // an import is running (drives the ✕)
 
     // A fresh source enumerated into per-entry URLs: persist as resume rows.
     void enumerated(const QString &jobId, const QString &createName,
@@ -73,6 +80,7 @@ private:
     void enqueue(Job job);
     void pump();                    // start the next job if idle
     void clearProc();
+    void setActive(bool active);    // emit importActiveChanged on a real transition
 
     void startEnumerate();
     void onEnumerateDone(int code, const QByteArray &out, const QByteArray &err);
@@ -95,6 +103,9 @@ private:
     QQueue<Job> m_queue;
     Job m_cur;
     bool m_running = false;
+    bool m_active = false;          // last importActiveChanged value (de-dupes emits)
+    bool m_cancelled = false;       // suppress late commits after cancelAll()
+    QSet<QNetworkReply *> m_coverReplies;   // in-flight cover downloads (abortable)
 
     // Enumerate-pass state.
     QString m_enumPlaylistTitle;
