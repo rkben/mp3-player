@@ -418,6 +418,27 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
     emit libraryLoaded(loadAll(nullptr));   // refresh the UI with the new rows
 }
 
+void MusicLibrary::removeTracks(const QStringList &uris)
+{
+    if (uris.isEmpty() || !ensureDb())
+        return;
+    if (m_scanning) {   // a DELETE/commit would nest inside the scan's transaction
+        m_deferredImports.append([=] { removeTracks(uris); });
+        return;
+    }
+    m_db.transaction();
+    QSqlQuery q(m_db);
+    q.prepare("DELETE FROM tracks WHERE uri=? AND remote=1");
+    for (const QString &uri : uris) {
+        q.addBindValue(uri);
+        if (!q.exec())
+            qWarning() << "[remove] delete failed:" << q.lastError().text();
+    }
+    m_db.commit();
+    qInfo("[remove] removed %lld remote track(s)", static_cast<long long>(uris.size()));
+    emit libraryLoaded(loadAll(nullptr));
+}
+
 void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
 {
     m_db.transaction();

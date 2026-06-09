@@ -298,7 +298,7 @@ QWidget *SettingsDialog::buildGeneralTab()
     // --- Managed yt-dlp (download + auto-update from GitHub releases) ---
     m_ytUseManaged = new QCheckBox(tr("Use managed yt-dlp"));
     m_ytUseManaged->setChecked(
-        QSettings().value(QStringLiteral("ytdlp/useManaged"), true).toBool());
+        QSettings().value(QStringLiteral("ytdlp/useManaged"), false).toBool());
     importForm->addRow(m_ytUseManaged);
     auto *ytManagedHint = new QLabel(tr("Download and keep yt-dlp updated "
         "automatically instead of using the copy on your system PATH."));

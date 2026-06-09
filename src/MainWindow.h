@@ -52,6 +52,7 @@ signals:
     void enrichTrack(const QString &path, const QString &title, const QString &artist,
                      const QString &album, int trackNo, qint64 durationMs);
     void importTracks(const QList<Track> &tracks);   // -> library worker
+    void removeTracks(const QStringList &uris);      // -> library worker (Remote tree)
 
 private slots:
     void openSettings(bool startOnLibrary = false);

@@ -19,7 +19,7 @@ QString RemoteResolver::ytDlpPath()
 
     // 2. The app-managed binary, when enabled and installed. Lives under AppData so a
     //    full reset removes it; the "Use managed" toggle lets the user prefer $PATH.
-    if (QSettings().value("ytdlp/useManaged", true).toBool()
+    if (QSettings().value("ytdlp/useManaged", false).toBool()
         && YtDlpManager::isManagedInstalled())
         return YtDlpManager::managedPath();
 

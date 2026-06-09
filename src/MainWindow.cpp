@@ -217,7 +217,7 @@ MainWindow::MainWindow(QWidget *parent)
                     ToastArea::post(
                         tr("yt-dlp update available (%1) — update in Settings").arg(tag));
             });
-    if (QSettings().value("ytdlp/useManaged", true).toBool())
+    if (QSettings().value("ytdlp/useManaged", false).toBool())
         m_ytdlp->checkLatest();
 
     startLibraryThread();
@@ -273,6 +273,7 @@ void MainWindow::startLibraryThread()
     connect(m_library, &MusicLibrary::scanProgress, this, &MainWindow::onScanProgress);
     connect(m_library, &MusicLibrary::scanStatus, this, &MainWindow::onScanStatus);
     connect(this, &MainWindow::importTracks, m_library, &MusicLibrary::importTracks);
+    connect(this, &MainWindow::removeTracks, m_library, &MusicLibrary::removeTracks);
 
     m_libThread->start();
 
@@ -1389,7 +1390,12 @@ void MainWindow::onTreeActivated(const QModelIndex &index)
     if (!index.isValid() || !isLeafNode(index))
         return;
     const QList<Track> add = tracksForKeys(keysForIndex(index));
-    if (!add.isEmpty())
+    if (add.isEmpty())
+        return;
+    // Nothing queued yet: start playing it rather than silently filling the queue.
+    if (m_controller->queueSize() == 0)
+        playNow(add);
+    else
         m_controller->enqueue(add);
 }
 
@@ -1419,6 +1425,17 @@ void MainWindow::onTreeContextMenu(const QPoint &pos)
                                                     : tr("Open directory")),
                     &QAction::triggered, this,
                     [this, track] { openTrackLocation(track); });
+            // Remote tracks can be removed from the library (local rows are owned by
+            // the folder scan, so they're left to the source settings instead).
+            if (track.isRemote()) {
+                menu.addSeparator();
+                connect(menu.addAction(tr("Remove")), &QAction::triggered, this,
+                        [this, keys] {
+                            const QStringList uris = keys();
+                            if (!uris.isEmpty())
+                                emit removeTracks(uris);
+                        });
+            }
         }
     } else {
         // Group nodes (folders, library-roots, artist/album/host): play or queue all.
@@ -1445,6 +1462,18 @@ void MainWindow::onTreeContextMenu(const QPoint &pos)
                         if (!tracks.isEmpty())
                             openTrackLocation(tracks.first());
                     });
+            // A remote group (Remote / host / artist / playlist): remove all its
+            // tracks. Confirm first since a group can span many tracks.
+            menu.addSeparator();
+            connect(menu.addAction(tr("Remove")), &QAction::triggered, this, [this, keys] {
+                const QStringList uris = keys();
+                if (uris.isEmpty())
+                    return;
+                if (QMessageBox::question(this, tr("Remove"),
+                        tr("Remove %n remote track(s) from the library?", nullptr,
+                           int(uris.size()))) == QMessageBox::Yes)
+                    emit removeTracks(uris);
+            });
         }
     }
     addToPlaylistMenu(&menu, keys);

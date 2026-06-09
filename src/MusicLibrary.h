@@ -63,6 +63,10 @@ public slots:
     // never touched by the folder scan/prune. Emits libraryLoaded when done.
     void importTracks(const QList<Track> &tracks);
 
+    // Remove remote tracks by uri (the Remote tree's "Remove"). Only remote rows are
+    // touched; local rows are owned by the folder scan. Emits libraryLoaded when done.
+    void removeTracks(const QStringList &uris);
+
     // --- Resumable imports (imports_resume table) -------------------------------
     // An import is two phases: the Importer enumerates a source into per-entry page
     // URLs, then hydrates each into a remote Track. These slots own the persisted
