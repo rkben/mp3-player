@@ -1858,8 +1858,11 @@ void MainWindow::importFromUrl()
     s.setValue("import/createPlaylist", dlg.createPlaylist());
     s.setValue("import/appendTo", dlg.appendPlaylist());
     // Imports queue (FIFO): if one is already running, this starts when it finishes.
+    // The dialog's Check already enumerated the entries — hand them over so the importer
+    // skips a second flat-playlist pass.
     const bool wasBusy = m_importer->busy();
-    m_importer->start(dlg.url(), dlg.createPlaylist(), dlg.appendPlaylist());
+    m_importer->start(dlg.url(), dlg.entries(), dlg.createPlaylist(), dlg.appendPlaylist(),
+                      dlg.playlistTitle());
     if (wasBusy)
         ToastArea::post(tr("Import queued — it'll start when the current one finishes."));
 }

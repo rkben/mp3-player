@@ -65,6 +65,7 @@ private slots:
 private:
     void onThemeRowChanged();
     void refreshYtStatus(const QString &override = QString());   // override = transient text
+    void updateYtPathField();   // show effective path; disable when managed is on
     QWidget *buildGeneralTab();
     QWidget *buildLibraryTab(bool autoSync);
     QWidget *buildLogTab();
@@ -80,6 +81,8 @@ private:
     QCheckBox *m_restoreQueue;
     QCheckBox *m_autoPlay;
     QLineEdit *m_ytDlpEdit;
+    QPushButton *m_ytReset = nullptr;   // clears the override; disabled when managed
+    QString m_savedYtOverride;   // the explicit ytdlp/path override at open ("" = none)
     QComboBox *m_audioCombo;
     QComboBox *m_preferHqCombo = nullptr;   // self-contained: persists to QSettings
     QPlainTextEdit *m_logView = nullptr;

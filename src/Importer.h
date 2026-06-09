@@ -6,6 +6,7 @@
 #include <QSet>
 
 #include "PlaylistModel.h"   // Track
+#include "YtDlp.h"
 
 class QProcess;
 class QNetworkAccessManager;
@@ -30,6 +31,12 @@ public:
     // source (yt-dlp playlist_title) is made; else if appendPlaylist is non-empty,
     // results are appended to it. Both off = library only. Enqueued (FIFO).
     void start(const QString &url, bool createPlaylist, const QString &appendPlaylist);
+
+    // Same, but with the per-entry URLs already enumerated (e.g. by the import dialog's
+    // Check) — skips the enumerate pass entirely. `playlistTitle` names a created
+    // playlist. Writes resume rows then hydrates.
+    void start(const QString &url, const QStringList &entries, bool createPlaylist,
+               const QString &appendPlaylist, const QString &playlistTitle);
 
 public slots:
     // Re-hydrate a job's still-pending entries (driven by MusicLibrary on startup).
@@ -57,7 +64,9 @@ private:
         QString createName;         // resolved after enumerate, or carried on resume
         QString appendName;
         QStringList entryUrls;      // hydrate targets (from enumerate or resume)
+        QString playlistTitle;      // for the pre-enumerated path (create-name + status)
         bool needEnumerate = false;
+        bool emitEnumerated = false;  // write resume rows before hydrating (fresh import)
         bool fromResume = false;    // suppress the whole-job failed() notification
     };
 
@@ -66,8 +75,8 @@ private:
     void clearProc();
 
     void startEnumerate();
-    void onEnumerateStdout();
-    void onEnumerateFinished();
+    void onEnumerateDone(int code, const QByteArray &out, const QByteArray &err);
+    void beginHydrateJob();         // emit enumerated (if fresh) then start hydrating
 
     void startHydrate();
     void onHydrateStdout();
@@ -77,7 +86,8 @@ private:
     void emitImported(const QString &entryUrl, const Track &track);
     void finishHydratePassIfReady();
 
-    QProcess *m_proc = nullptr;
+    QProcess *m_proc = nullptr;     // hydrate (streaming); enumerate uses m_enumDlp
+    YtDlp m_enumDlp;                // buffered flat-playlist enumerate
     QNetworkAccessManager *m_net = nullptr;
     QByteArray m_partial;           // incomplete trailing stdout line between reads
     QString m_artDir;
@@ -87,7 +97,6 @@ private:
     bool m_running = false;
 
     // Enumerate-pass state.
-    QStringList m_enumEntries;
     QString m_enumPlaylistTitle;
 
     // Hydrate-pass state.

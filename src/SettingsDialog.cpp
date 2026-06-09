@@ -30,6 +30,7 @@
 #include <QAudioDevice>
 
 #include "YtDlpManager.h"
+#include "YtDlp.h"
 
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
                                bool restoreQueue, bool autoPlay,
@@ -80,7 +81,8 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_autoPlay->setToolTip(tr("Start playback automatically when the app launches "
                               "(respects the shuffle setting)."));
 
-    m_ytDlpEdit = new QLineEdit(ytDlpPath);
+    m_savedYtOverride = ytDlpPath.trimmed();
+    m_ytDlpEdit = new QLineEdit;   // text set by updateYtPathField() once managed state is known
     m_ytDlpEdit->setPlaceholderText(tr("Path to yt-dlp"));
     m_ytDlpEdit->setToolTip(tr("Used to import and stream remote tracks. "
                                "Defaults to the yt-dlp found on $PATH."));
@@ -188,20 +190,41 @@ void SettingsDialog::refreshYtStatus(const QString &override)
     const QString ver = YtDlpManager::installedVersion();
     const bool unsupported = YtDlpManager::assetName().isEmpty();
 
+    // The "Managed:" row describes the managed binary's state. The label already says
+    // "Managed", so the value is just that state — no redundant "Managed: Installed:"
+    // / "Managed: Latest:" prefixes. Update info is appended by the latestVersion handler.
     if (!override.isEmpty())
         m_ytStatus->setText(override);
     else if (unsupported)
-        m_ytStatus->setText(tr("Not available for this platform."));
+        m_ytStatus->setText(tr("Not available for this platform"));
     else if (installed)
-        m_ytStatus->setText(ver.isEmpty() ? tr("Installed.")
-                                          : tr("Installed: %1").arg(ver));
+        m_ytStatus->setText(ver.isEmpty() ? tr("Installed") : tr("Installed (%1)").arg(ver));
     else
-        m_ytStatus->setText(tr("Not installed."));
+        m_ytStatus->setText(tr("Not installed"));
 
     m_ytDownload->setText(installed ? tr("Update") : tr("Download"));
     const bool busy = m_ytdlp && m_ytdlp->busy();
     m_ytDownload->setEnabled(!unsupported && m_ytdlp && !busy);
     m_ytRemove->setEnabled(installed && !busy);
+}
+
+void SettingsDialog::updateYtPathField()
+{
+    // Always show the *effective* yt-dlp location, not just an override. When managed is
+    // enabled the managed binary is what runs, so show its path and disable the field
+    // (the override doesn't apply); otherwise show the override if set, else the
+    // auto-detected $PATH location so the user can see what's being used.
+    const bool managed = m_ytUseManaged && m_ytUseManaged->isChecked();
+    if (managed) {
+        m_ytDlpEdit->setText(YtDlpManager::managedPath());
+        m_ytDlpEdit->setEnabled(false);
+    } else {
+        m_ytDlpEdit->setEnabled(true);
+        m_ytDlpEdit->setText(m_savedYtOverride.isEmpty() ? YtDlp::systemPath()
+                                                         : m_savedYtOverride);
+    }
+    if (m_ytReset)   // the override controls are inert while managed is authoritative
+        m_ytReset->setEnabled(!managed);
 }
 
 bool SettingsDialog::restoreQueue() const
@@ -216,7 +239,13 @@ bool SettingsDialog::autoPlay() const
 
 QString SettingsDialog::ytDlpPath() const
 {
-    return m_ytDlpEdit->text().trimmed();
+    // When managed is on the field just shows the managed path (informational), so don't
+    // persist it as an override. Otherwise persist the text only if it's a real override
+    // — not the auto-detected $PATH location the field is pre-filled with.
+    if (m_ytUseManaged && m_ytUseManaged->isChecked())
+        return QString();
+    const QString t = m_ytDlpEdit->text().trimmed();
+    return (t == YtDlp::systemPath()) ? QString() : t;
 }
 
 QByteArray SettingsDialog::audioDeviceId() const
@@ -323,7 +352,10 @@ QWidget *SettingsDialog::buildGeneralTab()
     importForm->addRow(ytBtns);
 
     if (m_ytdlp) {
-        connect(m_ytUseManaged, &QCheckBox::toggled, this, [this] { refreshYtStatus(); });
+        connect(m_ytUseManaged, &QCheckBox::toggled, this, [this] {
+            refreshYtStatus();
+            updateYtPathField();   // managed on -> show managed path + disable the field
+        });
         connect(m_ytDownload, &QPushButton::clicked, this, [this] {
             m_ytDownload->setEnabled(false);
             m_ytRemove->setEnabled(false);
@@ -343,10 +375,21 @@ QWidget *SettingsDialog::buildGeneralTab()
         connect(m_ytdlp, &YtDlpManager::removed, this, [this] { refreshYtStatus(); });
         connect(m_ytdlp, &YtDlpManager::failed, this,
                 [this](const QString &m) { refreshYtStatus(tr("Error: %1").arg(m)); });
+        // A failed version check clears busy but emits no version — re-enable the
+        // buttons (without it, Download stays greyed until the dialog is reopened).
+        connect(m_ytdlp, &YtDlpManager::checkFailed, this,
+                [this](const QString &) { refreshYtStatus(); });
         connect(m_ytdlp, &YtDlpManager::latestVersion, this,
                 [this](const QString &tag, bool upd) {
-                    refreshYtStatus(upd ? tr("Latest: %1 (update available)").arg(tag)
-                                        : tr("Up to date (%1)").arg(tag));
+                    if (!YtDlpManager::isManagedInstalled()) {
+                        refreshYtStatus();   // not installed: latest tag is just noise
+                        return;
+                    }
+                    const QString ver = YtDlpManager::installedVersion();
+                    const QString base = ver.isEmpty() ? tr("Installed")
+                                                       : tr("Installed (%1)").arg(ver);
+                    refreshYtStatus(upd ? tr("%1 — update available: %2").arg(base, tag)
+                                        : tr("%1 — up to date").arg(base));
                 });
         m_ytdlp->checkLatest();   // refresh availability when the dialog opens
     } else {
@@ -359,12 +402,16 @@ QWidget *SettingsDialog::buildGeneralTab()
     // yt-dlp path + Reset. Reset only clears this explicit override (falls back to the
     // managed binary if enabled, else $PATH) — it never deletes the managed binary.
     auto *ytRow = new QHBoxLayout;
-    auto *ytReset = new QPushButton(tr("Reset"));
-    ytReset->setToolTip(tr("Clear this override (use managed yt-dlp or $PATH)."));
-    connect(ytReset, &QPushButton::clicked, this, [this] { m_ytDlpEdit->clear(); });
+    m_ytReset = new QPushButton(tr("Reset"));
+    m_ytReset->setToolTip(tr("Clear this override (use managed yt-dlp or $PATH)."));
+    connect(m_ytReset, &QPushButton::clicked, this, [this] {
+        m_savedYtOverride.clear();
+        updateYtPathField();   // back to the auto-detected $PATH location
+    });
     ytRow->addWidget(m_ytDlpEdit, 1);
-    ytRow->addWidget(ytReset);
+    ytRow->addWidget(m_ytReset);
     importForm->addRow(tr("yt-dlp path:"), ytRow);
+    updateYtPathField();   // initial display (effective path; disabled if managed)
     // Curated list of sources known to map cleanly (anything yt-dlp supports still
     // imports generically — this is guidance, not a gate). Extend as sources are
     // tuned in Importer::parseLine. A full-width hint under the path: a word-wrap

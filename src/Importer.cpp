@@ -1,5 +1,4 @@
 #include "Importer.h"
-#include "RemoteResolver.h"   // ytDlpPath()
 #include "ProcUtil.h"
 
 #include <QProcess>
@@ -119,6 +118,14 @@ Importer::Importer(QObject *parent)
 {
     m_artDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                + QStringLiteral("/art");
+    connect(&m_enumDlp, &YtDlp::finished, this, &Importer::onEnumerateDone);
+    connect(&m_enumDlp, &YtDlp::startFailed, this, [this](const QString &msg) {
+        if (!m_cur.fromResume)
+            emit failed(msg);
+        emit status(QString());
+        m_running = false;
+        pump();
+    });
 }
 
 void Importer::start(const QString &url, bool createPlaylist,
@@ -130,6 +137,25 @@ void Importer::start(const QString &url, bool createPlaylist,
     job.createPlaylist = createPlaylist;
     job.appendName = appendPlaylist;
     job.needEnumerate = true;
+    enqueue(std::move(job));
+}
+
+void Importer::start(const QString &url, const QStringList &entries, bool createPlaylist,
+                     const QString &appendPlaylist, const QString &playlistTitle)
+{
+    if (entries.isEmpty()) {   // nothing pre-enumerated: fall back to enumerating
+        start(url, createPlaylist, appendPlaylist);
+        return;
+    }
+    Job job;
+    job.jobId = QUuid::createUuid().toString(QUuid::Id128);
+    job.sourceUrl = url;
+    job.createPlaylist = createPlaylist;
+    job.appendName = appendPlaylist;
+    job.entryUrls = entries;
+    job.playlistTitle = playlistTitle;
+    job.needEnumerate = false;     // already enumerated by the dialog's Check
+    job.emitEnumerated = true;     // but still write resume rows before hydrating
     enqueue(std::move(job));
 }
 
@@ -158,7 +184,7 @@ void Importer::pump()
 {
     if (m_running || m_queue.isEmpty())
         return;
-    const QString exe = RemoteResolver::ytDlpPath();
+    const QString exe = YtDlp::path();
     if (exe.isEmpty()) {
         // Drain the queue: without yt-dlp nothing can proceed. Only fresh jobs warrant
         // a notification (a resume should stay quiet and just wait for a future launch).
@@ -172,17 +198,18 @@ void Importer::pump()
     m_cur = m_queue.dequeue();
     m_running = true;
     m_partial.clear();
-    m_enumEntries.clear();
-    m_enumPlaylistTitle.clear();
+    m_enumPlaylistTitle = m_cur.playlistTitle;   // known up-front on the pre-enumerated path
     m_pending.clear();
     m_committed = 0;
     m_pendingCovers = 0;
     m_hydrateProcDone = false;
 
     if (m_cur.needEnumerate)
-        startEnumerate();
+        startEnumerate();         // -> onEnumerateDone -> beginHydrateJob
+    else if (m_cur.emitEnumerated)
+        beginHydrateJob();        // pre-enumerated fresh import: write rows, then hydrate
     else
-        startHydrate();
+        startHydrate();           // resume: rows already exist
 }
 
 void Importer::clearProc()
@@ -201,56 +228,37 @@ void Importer::startEnumerate()
 {
     qInfo().noquote() << QStringLiteral("[import] enumerate %1").arg(m_cur.sourceUrl);
     emit status(tr("Reading %1…").arg(m_cur.sourceUrl));
-
-    m_proc = new QProcess(this);
-    connect(m_proc, &QProcess::readyReadStandardOutput, this, &Importer::onEnumerateStdout);
-    connect(m_proc, &QProcess::finished, this, &Importer::onEnumerateFinished);
-    suppressConsoleWindow(m_proc);
     // --flat-playlist: list entries without extracting each — cheap and fast. JSON per
-    // entry carries its page URL (and the playlist title for the create-name).
-    m_proc->start(RemoteResolver::ytDlpPath(),
-                  {QStringLiteral("--flat-playlist"), QStringLiteral("--dump-json"),
+    // entry carries its page URL (and the playlist title for the create-name). Buffered
+    // via the runner; parsed in onEnumerateDone.
+    m_enumDlp.run({QStringLiteral("--flat-playlist"), QStringLiteral("--dump-json"),
                    QStringLiteral("--no-warnings"), QStringLiteral("--ignore-errors"),
                    m_cur.sourceUrl});
 }
 
-void Importer::onEnumerateStdout()
+void Importer::onEnumerateDone(int /*code*/, const QByteArray &out, const QByteArray &err)
 {
-    m_partial += m_proc->readAllStandardOutput();
-    int nl;
-    while ((nl = m_partial.indexOf('\n')) >= 0) {
-        const QByteArray line = m_partial.left(nl);
-        m_partial.remove(0, nl + 1);
+    QStringList entries;
+    for (const QByteArray &line : out.split('\n')) {
         if (line.trimmed().isEmpty())
             continue;
-        QJsonParseError err;
-        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject())
+        QJsonParseError perr;
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject())
             continue;
         const QJsonObject o = doc.object();
         const QString url = firstOf(o, {"url", "webpage_url", "original_url"});
-        if (!url.isEmpty() && !m_enumEntries.contains(url))
-            m_enumEntries << url;
+        if (!url.isEmpty() && !entries.contains(url))
+            entries << url;
         if (m_enumPlaylistTitle.isEmpty())
             m_enumPlaylistTitle = firstOf(o, {"playlist_title", "playlist", "title"});
     }
-}
 
-void Importer::onEnumerateFinished()
-{
-    onEnumerateStdout();   // drain the tail (last line may lack a trailing newline)
-    if (!m_partial.trimmed().isEmpty()) {
-        // A final object without a newline: parse it directly.
-        m_partial += '\n';
-        onEnumerateStdout();
-    }
-    const QString errText = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
-
-    if (m_enumEntries.isEmpty()) {
+    if (entries.isEmpty()) {
+        const QString errText = QString::fromUtf8(err).trimmed();
         const QString why = errText.isEmpty() ? tr("yt-dlp returned nothing")
                                               : errText.section('\n', 0, 0);
         qWarning().noquote() << QStringLiteral("[import] enumerate failed — %1").arg(why);
-        clearProc();
         emit status(QString());
         if (!m_cur.fromResume)
             emit failed(why);
@@ -259,17 +267,19 @@ void Importer::onEnumerateFinished()
         return;
     }
 
+    m_cur.entryUrls = entries;
+    qInfo("[import] enumerated %lld entry(ies) for job %s",
+          static_cast<long long>(entries.size()), qPrintable(m_cur.jobId));
+    beginHydrateJob();
+}
+
+void Importer::beginHydrateJob()
+{
     if (m_cur.createPlaylist)
         m_cur.createName = m_enumPlaylistTitle.isEmpty() ? tr("Imported")
                                                          : m_enumPlaylistTitle;
-    m_cur.entryUrls = m_enumEntries;
-    qInfo("[import] enumerated %lld entry(ies) for job %s",
-          static_cast<long long>(m_cur.entryUrls.size()), qPrintable(m_cur.jobId));
-
     // Persist the resume rows before hydrating; commits land after via queued signals.
     emit enumerated(m_cur.jobId, m_cur.createName, m_cur.appendName, m_cur.entryUrls);
-
-    clearProc();
     startHydrate();
 }
 
@@ -296,7 +306,7 @@ void Importer::startHydrate()
     // --dump-json over the pending entry URLs, fed on stdin via --batch-file - so a
     // huge playlist can't blow ARG_MAX. --ignore-errors so one bad entry (e.g. DRM)
     // doesn't abort the rest; those simply produce no JSON and are retried/dropped.
-    m_proc->start(RemoteResolver::ytDlpPath(),
+    m_proc->start(YtDlp::path(),
                   {QStringLiteral("--dump-json"), QStringLiteral("--no-warnings"),
                    QStringLiteral("--ignore-errors"),
                    QStringLiteral("--batch-file"), QStringLiteral("-")});

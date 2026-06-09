@@ -1,6 +1,5 @@
 #include "ImportDialog.h"
-#include "RemoteResolver.h"   // ytDlpPath()
-#include "ProcUtil.h"
+#include "YtDlp.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -14,7 +13,8 @@
 #include <QFontDatabase>
 #include <QGroupBox>
 #include <QDialogButtonBox>
-#include <QProcess>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QUrl>
 
 ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
@@ -83,8 +83,23 @@ ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
 
     connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    // The Check probe runs through a lifecycle-safe runner: it's a child of the dialog,
+    // so closing the dialog mid-check cancels it cleanly (no callback into freed members).
+    m_dlp = new YtDlp(this);
+    connect(m_dlp, &YtDlp::finished, this, &ImportDialog::onCheckDone);
+    connect(m_dlp, &YtDlp::startFailed, this, [this](const QString &msg) {
+        m_info->setText(msg);
+        m_check->setEnabled(true);
+    });
+
     connect(m_check, &QPushButton::clicked, this, &ImportDialog::runCheck);
     connect(m_url, &QLineEdit::returnPressed, this, &ImportDialog::runCheck);
+    // Editing the URL invalidates a prior check: require a fresh one before Import so
+    // the captured entries can't go stale against a changed URL.
+    connect(m_url, &QLineEdit::textEdited, this, [this] {
+        m_entries.clear();
+        m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    });
     // Create-from-URL and append-to-existing are mutually exclusive.
     connect(m_create, &QCheckBox::toggled, this, [this](bool on) {
         m_append->setEnabled(!on && m_multiple);
@@ -94,7 +109,7 @@ ImportDialog::ImportDialog(const QStringList &playlists, bool savedCreate,
     m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);   // require a check first
 
     // Without yt-dlp there's nothing to import: warn up top and disable the input.
-    if (RemoteResolver::ytDlpPath().isEmpty()) {
+    if (YtDlp::path().isEmpty()) {
         m_needYtDlp->show();
         m_url->setEnabled(false);
         m_check->setEnabled(false);
@@ -114,61 +129,81 @@ void ImportDialog::runCheck()
     const QString url = m_url->text().trimmed();
     if (url.isEmpty())
         return;
-    const QString exe = RemoteResolver::ytDlpPath();
-    if (exe.isEmpty()) {
+    if (YtDlp::path().isEmpty()) {
         m_info->setText(tr("yt-dlp not found — set its path in Settings."));
         return;
     }
-    if (m_proc)
+    if (m_dlp->busy())
         return;   // a check is already running
 
     m_check->setEnabled(false);
     m_info->setText(tr("Checking…"));
+    m_entries.clear();
+    m_playlistTitle.clear();
+    // --flat-playlist --dump-json: the same shallow probe the importer enumerates with,
+    // so we capture the per-entry URLs (and playlist title) here and hand them straight
+    // to the import — no second flat-playlist pass.
+    m_dlp->run({QStringLiteral("--flat-playlist"), QStringLiteral("--dump-json"),
+                QStringLiteral("--no-warnings"), QStringLiteral("--ignore-errors"), url});
+}
 
-    m_proc = new QProcess(this);
-    // Fast, shallow probe: list entry ids without extracting each track.
-    suppressConsoleWindow(m_proc);
-    m_proc->start(exe, {QStringLiteral("--flat-playlist"), QStringLiteral("--no-warnings"),
-                        QStringLiteral("--print"), QStringLiteral("id"), url});
-    connect(m_proc, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-        const int count = QString::fromUtf8(m_proc->readAllStandardOutput())
-                              .split('\n', Qt::SkipEmptyParts).size();
-        const QString err = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
-        m_proc->deleteLater();
-        m_proc = nullptr;
-        m_check->setEnabled(true);
+void ImportDialog::onCheckDone(int /*code*/, const QByteArray &out, const QByteArray &err)
+{
+    m_check->setEnabled(true);
 
-        if (code != 0 && count == 0) {
-            // Short reason in the label; the full yt-dlp output in the error box.
-            // HearThis.at and ReverbNation only expose individual tracks in yt-dlp,
-            // so an uploader/playlist URL fails — give a clearer reason than "couldn't
-            // read" (see notes/new_remote_sources.md).
-            const QString host = QUrl(m_url->text().trimmed()).host();
-            const bool singleOnly =
-                host.contains(QLatin1String("hearthis.at"), Qt::CaseInsensitive)
-                || host.contains(QLatin1String("reverbnation.com"), Qt::CaseInsensitive);
-            m_info->setText(singleOnly ? tr("This source only supports single tracks.")
-                                       : tr("Couldn't read that URL."));
-            if (err.isEmpty()) {
-                m_errorView->hide();
-            } else {
-                m_errorView->setPlainText(err);
-                m_errorView->show();
-            }
-            m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-            return;
+    auto strOf = [](const QJsonObject &o, std::initializer_list<const char *> keys) {
+        for (const char *k : keys) {
+            const QString v = o.value(QLatin1String(k)).toString().trimmed();
+            if (!v.isEmpty())
+                return v;
         }
-        m_errorView->clear();
-        m_errorView->hide();
-        if (count > 1) {
-            m_info->setText(tr("Found %n track(s).", nullptr, count));
-            setPlaylistOptionsEnabled(true);
+        return QString();
+    };
+    for (const QByteArray &line : out.split('\n')) {
+        if (line.trimmed().isEmpty())
+            continue;
+        const QJsonDocument doc = QJsonDocument::fromJson(line);
+        if (!doc.isObject())
+            continue;
+        const QJsonObject o = doc.object();
+        const QString u = strOf(o, {"url", "webpage_url", "original_url"});
+        if (!u.isEmpty() && !m_entries.contains(u))
+            m_entries << u;
+        if (m_playlistTitle.isEmpty())
+            m_playlistTitle = strOf(o, {"playlist_title", "playlist", "title"});
+    }
+    const int count = m_entries.size();
+
+    if (count == 0) {
+        // Short reason in the label; the full yt-dlp output in the error box. HearThis.at
+        // and ReverbNation only expose individual tracks in yt-dlp, so an uploader/
+        // playlist URL fails — give a clearer reason (see notes/new_remote_sources.md).
+        const QString host = QUrl(m_url->text().trimmed()).host();
+        const bool singleOnly =
+            host.contains(QLatin1String("hearthis.at"), Qt::CaseInsensitive)
+            || host.contains(QLatin1String("reverbnation.com"), Qt::CaseInsensitive);
+        m_info->setText(singleOnly ? tr("This source only supports single tracks.")
+                                   : tr("Couldn't read that URL."));
+        const QString errText = QString::fromUtf8(err).trimmed();
+        if (errText.isEmpty()) {
+            m_errorView->hide();
         } else {
-            m_info->setText(tr("Single track."));
-            setPlaylistOptionsEnabled(false);
+            m_errorView->setPlainText(errText);
+            m_errorView->show();
         }
-        m_buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
-    });
+        m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+        return;
+    }
+    m_errorView->clear();
+    m_errorView->hide();
+    if (count > 1) {
+        m_info->setText(tr("Found %n track(s).", nullptr, count));
+        setPlaylistOptionsEnabled(true);
+    } else {
+        m_info->setText(tr("Single track."));
+        setPlaylistOptionsEnabled(false);
+    }
+    m_buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
 }
 
 QString ImportDialog::url() const { return m_url->text().trimmed(); }
