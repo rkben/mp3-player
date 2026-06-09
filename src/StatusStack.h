@@ -21,8 +21,9 @@ public:
     // Define a value per source; larger wins. Co-located so the priority ordering of
     // all status sources is visible in one place.
     enum Slot {
-        Scan  = 0,    // library scan / background import progress
-        Fetch = 10,   // resolving/opening a remote stream (transient, user-initiated)
+        Scan     = 0,    // library scan / background import progress
+        Prefetch = 5,    // resolving the *next* remote stream ahead of time (background)
+        Fetch    = 10,   // resolving/opening a remote stream (transient, user-initiated)
     };
 
     void post(int slot, const QString &message)

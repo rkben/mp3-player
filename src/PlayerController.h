@@ -90,6 +90,9 @@ signals:
     // second); false once it resolves/fails or a local track is loaded. Drives a
     // "Fetching remote track…" status hint.
     void remoteResolving(bool active);
+    // True while the *next* remote track's stream URL is being resolved ahead of time
+    // (a few seconds before the current one ends); drives a "Prefetching…" status hint.
+    void remotePrefetching(bool active);
     void positionChanged(qint64 ms);
     void durationChanged(qint64 ms);
     void volumeChanged(float linear);
@@ -119,6 +122,8 @@ private:
     void skipBadTrack(const QString &message);
     void playInternal(int qindex);   // load + play, no history side effects
     void recordHistory(int qindex);  // push onto the back/forward history
+    void decideAutoNext();           // cache the index end-of-track will advance to
+    void maybePrefetch();            // resolve the next remote stream URL ahead of time
 
     QThread *m_engineThread;
     MediaEngine *m_engine;
@@ -133,6 +138,10 @@ private:
     int m_index = -1;              // m_current's index into m_queue, or -1 if detached
     QList<int> m_history;          // recently played queue indices (back/forward)
     int m_historyPos = -1;
+    int m_autoNext = -1;           // index end-of-track advances to (decided once/track)
+    QUrl m_prefetchUrl;            // page URL being/already prefetched (empty = none)
+    QUrl m_prefetchStream;         // its resolved stream URL (non-empty == ready)
+    bool m_prefetchTriggered = false;   // one prefetch attempt per track
     RepeatMode m_repeat = RepeatMode::None;
     bool m_shuffle = false;
     int m_consecutiveErrors = 0;   // guards against an all-bad queue looping

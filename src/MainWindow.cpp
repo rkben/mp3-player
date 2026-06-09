@@ -155,6 +155,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &PlayerController::remoteResolving, this, [this](bool active) {
         m_status->post(StatusStack::Fetch, active ? tr("Fetching remote track…") : QString());
     });
+    // Background prefetch of the next remote track's stream URL (lower-priority slot,
+    // so an active foreground fetch outranks it).
+    connect(m_controller, &PlayerController::remotePrefetching, this, [this](bool active) {
+        m_status->post(StatusStack::Prefetch,
+                       active ? tr("Prefetching remote track…") : QString());
+    });
     connect(m_controller, &PlayerController::positionChanged,
             this, &MainWindow::onPositionChanged);
     connect(m_controller, &PlayerController::durationChanged,

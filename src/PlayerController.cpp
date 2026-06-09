@@ -10,6 +10,9 @@
 #include <QVector>
 
 namespace {
+// How far before a remote track ends to start resolving the next one's stream URL.
+constexpr qint64 kPrefetchLeadMs = 20000;
+
 // Quality tier from the file extension: lossless > lossy; -1 = not a local file
 // (remote tracks are never grouped/deduped).
 int qualityTier(const Track &t)
@@ -107,6 +110,11 @@ PlayerController::PlayerController(QObject *parent)
     connect(m_engine, &MediaEngine::positionChanged, this, [this](qint64 ms) {
         m_position = ms;
         emit positionChanged(ms);
+        // Near the end of a remote track, resolve the next one's stream URL ahead of
+        // time so the hand-off is gapless (yt-dlp -g takes ~1s).
+        if (!m_prefetchTriggered && m_duration > kPrefetchLeadMs
+            && m_duration - ms <= kPrefetchLeadMs)
+            maybePrefetch();
     });
     connect(m_engine, &MediaEngine::durationChanged, this, [this](qint64 ms) {
         m_duration = ms;
@@ -127,13 +135,22 @@ PlayerController::PlayerController(QObject *parent)
             [this](const QUrl &pageUrl, const QUrl &streamUrl) {
                 // Keep the "fetching" hint up through the engine opening/buffering the
                 // stream URL; it clears when playback actually starts (or on skip).
-                if (hasTrack() && m_current.url == pageUrl)
+                if (hasTrack() && m_current.url == pageUrl) {
                     emit engineLoad(streamUrl, /*autoplay=*/true);
+                } else if (pageUrl == m_prefetchUrl) {
+                    m_prefetchStream = streamUrl;        // ready: consumed by playInternal
+                    emit remotePrefetching(false);
+                }
             });
     connect(m_resolver, &RemoteResolver::failed, this,
             [this](const QUrl &pageUrl, const QString &message) {
-                if (hasTrack() && m_current.url == pageUrl)
+                if (hasTrack() && m_current.url == pageUrl) {
                     skipBadTrack(message);
+                } else if (pageUrl == m_prefetchUrl) {
+                    m_prefetchUrl = QUrl{};              // give up; resolve on arrival
+                    m_prefetchStream = QUrl{};
+                    emit remotePrefetching(false);
+                }
             });
 
     m_engineThread->start();
@@ -167,11 +184,33 @@ void PlayerController::playInternal(int qindex)
     qInfo().noquote() << QStringLiteral("[play] %1%2")
                              .arg(t.displayText(),
                                   t.isRemote() ? QStringLiteral(" (remote)") : QString());
-    emit remoteResolving(t.isRemote());   // show the fetch hint for remote; clear for local
-    if (t.isRemote())
-        m_resolver->resolve(t.url);   // engineLoad fires once the stream resolves
-    else
+
+    // A new track obsoletes any pending prefetch *status* (a user skip mid-prefetch
+    // also lands here); allow a fresh prefetch once this track nears its end.
+    emit remotePrefetching(false);
+    m_prefetchTriggered = false;
+
+    if (!t.isRemote()) {
+        emit remoteResolving(false);
         emit engineLoad(t.url, /*autoplay=*/true);
+    } else if (t.url == m_prefetchUrl && !m_prefetchStream.isEmpty()) {
+        // Prefetched and ready: hand the stream straight to the engine — no gap.
+        emit remoteResolving(false);
+        emit engineLoad(m_prefetchStream, /*autoplay=*/true);
+        m_prefetchUrl = QUrl{};
+        m_prefetchStream = QUrl{};
+    } else if (t.url == m_prefetchUrl) {
+        // Prefetch for this very track is still in flight: don't cancel+restart it —
+        // its result now loads via the current-track branch (m_current.url == pageUrl).
+        emit remoteResolving(true);
+        m_prefetchUrl = QUrl{};
+    } else {
+        // Fresh resolve (drop any unrelated prefetch in flight; resolve() cancels it).
+        m_prefetchUrl = QUrl{};
+        m_prefetchStream = QUrl{};
+        emit remoteResolving(true);
+        m_resolver->resolve(t.url);
+    }
     emit currentTrackChanged(t);
 }
 
@@ -180,14 +219,44 @@ void PlayerController::recordHistory(int qindex)
     // Starting a new track drops any "forward" history we'd navigated back past.
     while (m_history.size() > m_historyPos + 1)
         m_history.removeLast();
-    if (!m_history.isEmpty() && m_history.last() == qindex)
-        return;   // repeat-one / replaying same track: no dup entry
-    m_history.append(qindex);
-    // Retain a small window so "previous" can walk back through recent plays.
-    constexpr int kMaxHistory = 6;   // current + up to 5 prior
-    while (m_history.size() > kMaxHistory)
-        m_history.removeFirst();
-    m_historyPos = m_history.size() - 1;
+    // repeat-one / replaying same track: no dup entry, but still re-decide the next.
+    if (m_history.isEmpty() || m_history.last() != qindex) {
+        m_history.append(qindex);
+        // Retain a small window so "previous" can walk back through recent plays.
+        constexpr int kMaxHistory = 6;   // current + up to 5 prior
+        while (m_history.size() > kMaxHistory)
+            m_history.removeFirst();
+        m_historyPos = m_history.size() - 1;
+    }
+    decideAutoNext();
+}
+
+void PlayerController::decideAutoNext()
+{
+    // The index end-of-track will advance to, decided once here (so a shuffle roll
+    // isn't repeated by the prefetch and the actual advance) and consumed by both.
+    if (!hasTrack() || m_queue.isEmpty())
+        m_autoNext = -1;
+    else if (m_repeat == RepeatMode::One)
+        m_autoNext = m_index;                       // replay the same track
+    else if (m_historyPos + 1 < m_history.size())
+        m_autoNext = m_history.at(m_historyPos + 1);  // forward entry (we stepped back)
+    else
+        m_autoNext = pickNext(/*userInitiated=*/false);   // rolled once; cached
+}
+
+void PlayerController::maybePrefetch()
+{
+    m_prefetchTriggered = true;   // one attempt per track regardless of outcome
+    if (m_autoNext < 0 || m_autoNext >= m_queue.size())
+        return;
+    const Track &next = m_queue.at(m_autoNext);
+    if (!next.isRemote() || next.url == m_current.url || next.url == m_prefetchUrl)
+        return;   // local (no resolve needed), repeat-one's same track, or already going
+    m_prefetchUrl = next.url;
+    m_prefetchStream = QUrl{};
+    emit remotePrefetching(true);
+    m_resolver->resolve(next.url);
 }
 
 void PlayerController::playQueue(const QList<Track> &tracks, int start)
@@ -220,6 +289,7 @@ void PlayerController::enqueue(const QList<Track> &tracks)
         return;
     m_queue.append(applyPreferHq(tracks, m_preferHq));   // dedup the appended batch
     emit queueChanged(m_queue);
+    decideAutoNext();   // a track may now follow what was the last one
 }
 
 void PlayerController::jumpTo(int index)
@@ -242,6 +312,9 @@ void PlayerController::clearQueue()
     m_index = -1;
     m_history.clear();
     m_historyPos = -1;
+    m_autoNext = -1;
+    m_prefetchUrl = QUrl{};
+    m_prefetchStream = QUrl{};
     m_consecutiveErrors = 0;
     m_lastErrorUrl = QUrl{};
     emit queueChanged(m_queue);
@@ -294,6 +367,7 @@ void PlayerController::next()
     if (m_historyPos >= 0 && m_historyPos + 1 < m_history.size()) {
         ++m_historyPos;
         playInternal(m_history.at(m_historyPos));
+        decideAutoNext();
         return;
     }
     const int n = pickNext(/*userInitiated=*/true);
@@ -321,6 +395,7 @@ void PlayerController::previous()
     if (m_historyPos > 0) {
         --m_historyPos;
         playInternal(m_history.at(m_historyPos));
+        decideAutoNext();
         return;
     }
     if (m_shuffle)
@@ -358,6 +433,7 @@ void PlayerController::setRepeatMode(RepeatMode mode)
     if (m_repeat == mode)
         return;
     m_repeat = mode;
+    decideAutoNext();   // the next track depends on the repeat mode
     emit repeatModeChanged(mode);
 }
 
@@ -366,6 +442,7 @@ void PlayerController::setShuffle(bool on)
     if (m_shuffle == on)
         return;
     m_shuffle = on;
+    decideAutoNext();   // re-roll the next under the new order
     emit shuffleChanged(on);
 }
 
@@ -409,10 +486,21 @@ void PlayerController::onMediaStatusChanged(QMediaPlayer::MediaStatus status)
 {
     if (status == QMediaPlayer::EndOfMedia) {
         m_consecutiveErrors = 0;   // reached the end cleanly
-        const int n = pickNext(/*userInitiated=*/false);
+        // Advance to the index decided when this track started (so it matches what was
+        // prefetched). Guard against a stale index if the queue shrank under us.
+        const int n = (m_autoNext >= 0 && m_autoNext < m_queue.size())
+                          ? m_autoNext : pickNext(/*userInitiated=*/false);
         if (n >= 0) {
-            playInternal(n);
-            recordHistory(n);
+            // Consume the forward-history entry if that's what we're advancing to;
+            // otherwise it's a freshly-rolled next that recordHistory appends.
+            if (m_historyPos + 1 < m_history.size() && m_history.at(m_historyPos + 1) == n) {
+                ++m_historyPos;
+                playInternal(n);
+                decideAutoNext();
+            } else {
+                playInternal(n);
+                recordHistory(n);
+            }
         }
     } else if (status == QMediaPlayer::InvalidMedia) {
         // Unsupported codec / corrupt file: don't let it stall the queue.
