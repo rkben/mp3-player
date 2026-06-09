@@ -25,8 +25,6 @@ I haven't read most of this, initially an experiment and turned out okay.
 
 
 ## In-Progress (by prio)
-- Import resume
- - probably another table for imports, dump from `yt-dlp --flat-playlist`, check against tracks table
 - DB invalidation improvements (probably too fragile as-is)
 - Checking for new updates via GH latest/releases
 - Better custom stylesheet support
