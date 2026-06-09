@@ -2,7 +2,7 @@
 A media player.
 
 
-Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates around 280 USD in tokens. (Random evaluation by max effort)
+Written by Claude Code, Opus 4.8 - low effort. `/usage` estimates around 330 USD in tokens. (Random evaluation by max effort)
 
 
 I haven't read most of this, initially an experiment and turned out okay.
