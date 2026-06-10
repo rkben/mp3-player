@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QEvent>
 #include <QMetaObject>
+#include <QFontMetrics>
 
 ToastArea *ToastArea::s_instance = nullptr;
 
@@ -58,17 +59,31 @@ void ToastArea::post(const QString &text)
 
 void ToastArea::addToast(const QString &text)
 {
-    auto *pill = new QLabel(text, this);
+    // Sizing approach distilled from niklashenning/qt-toast: don't trust the layout's
+    // heightForWidth for a word-wrapped label (it clipped the text). Instead measure the
+    // wrapped text with QFontMetrics, place the label at a fixed geometry, and give the
+    // pill a fixed size = text box + padding. The QVBoxLayout just stacks fixed pills.
+    constexpr int padX = 14, padY = 9;
+    auto *pill = new QWidget(this);
     pill->setObjectName("toast");
-    pill->setWordWrap(true);
-    pill->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    pill->setMargin(0);
     // Self-contained styling so a toast reads on any theme without a global stylesheet.
     pill->setStyleSheet(
-        "QLabel#toast {"
-        "  background: rgba(40,40,40,235); color: #f0f0f0;"
-        "  border: 1px solid rgba(255,255,255,40); border-radius: 8px;"
-        "  padding: 8px 12px; }");
+        "QWidget#toast {"
+        "  background: rgba(40,40,40,235);"
+        "  border: 1px solid rgba(255,255,255,40); border-radius: 8px; }");
+
+    auto *label = new QLabel(text, pill);
+    label->setWordWrap(true);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    label->setStyleSheet(QStringLiteral("color: #f0f0f0; background: transparent;"));
+
+    const int maxTextW = qMax(220, qMin(520, width() - 48)) - 2 * padX;
+    const QRect br = label->fontMetrics().boundingRect(
+        QRect(0, 0, maxTextW, 0), Qt::TextWordWrap, text);
+    const int textW = qMin(br.width() + 1, maxTextW);
+    const int textH = br.height();
+    label->setGeometry(padX, padY, textW, textH);
+    pill->setFixedSize(textW + 2 * padX, textH + 2 * padY);
     // Insert just before the bottom stretch (last item), anchored to the right.
     m_layout->insertWidget(m_layout->count() - 1, pill, 0, Qt::AlignRight);
 

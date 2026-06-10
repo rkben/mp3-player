@@ -81,7 +81,7 @@ DiscordPresence::DiscordPresence(PlayerController *player, QObject *parent)
     : QObject(parent), m_player(player), m_socket(nullptr),
       m_reconnect(nullptr), m_debounce(nullptr)
 {
-    m_enabled = QSettings().value(QStringLiteral("discord/enabled"), true).toBool();
+    m_enabled = QSettings().value(QStringLiteral("discord/enabled"), false).toBool();
     m_appId = effectiveAppId();
     if (m_appId.isEmpty()) {
         // Compiled in but no application ID configured — stay completely idle.

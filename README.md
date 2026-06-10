@@ -143,5 +143,8 @@ Built with:
 - **TagLib** — LGPLv2.1 / MPL 1.1 — <https://taglib.org/>
 - **FFmpeg** — LGPLv2.1+ (Qt Multimedia backend) — <https://ffmpeg.org/>
 
+Toast sizing approach adapted from **qt-toast** by Niklas Henning — MIT —
+<https://github.com/niklashenning/qt-toast>
+
 `album_icon.svg` by Pymouss, own work, Public Domain —
 [commons.wikimedia.org](https://commons.wikimedia.org/w/index.php?curid=5793388)

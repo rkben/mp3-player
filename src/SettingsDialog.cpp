@@ -461,7 +461,7 @@ QWidget *SettingsDialog::buildGeneralTab()
     // Enable toggle — applied live by the host (connect/disconnect), saved on OK.
     m_discordEnabled = new QCheckBox(tr("Show now-playing as a Discord status"));
     m_discordEnabled->setChecked(
-        QSettings().value(QStringLiteral("discord/enabled"), true).toBool());
+        QSettings().value(QStringLiteral("discord/enabled"), false).toBool());
     connect(m_discordEnabled, &QCheckBox::toggled, this,
             [this](bool on) { emit discordEnabledChanged(on); });
     discordForm->addRow(m_discordEnabled);
@@ -670,7 +670,9 @@ QWidget *SettingsDialog::buildAboutTab()
     richLabel(tr(
         "<b>album_icon.svg</b> — by Pymouss, Own work, Public Domain · "
         "<a href=\"https://commons.wikimedia.org/w/index.php?curid=5793388\">"
-        "commons.wikimedia.org</a>"));
+        "commons.wikimedia.org</a><br>"
+        "<b>qt-toast</b> — toast sizing approach, by Niklas Henning, MIT · "
+        "<a href=\"https://github.com/niklashenning/qt-toast\">github.com</a>"));
 
     layout->addStretch();
     return about;
