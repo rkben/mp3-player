@@ -7,8 +7,6 @@
 #include <QAtomicInt>
 #include <QThreadPool>
 
-#include <functional>
-
 #include "PlaylistModel.h"   // Track
 
 class QTimer;
@@ -129,7 +127,6 @@ private:
     void insertRemoteRows(const QList<Track> &t); // remote upsert, no libraryLoaded emit
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
     QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
-    void flushPendingImports();   // drain imports deferred during a scan
     static void upsert(QSqlQuery &q, const Track &t, qint64 mtime);
     static Track parseTags(const QString &path, qint64 mtime);
     QString extractArt(const QString &path, qint64 mtime);   // -> file:// URL or empty
@@ -138,11 +135,10 @@ private:
     QSqlDatabase m_db;
     QString m_artDir;     // cache dir for extracted embedded covers
     bool m_opened = false;
-    bool m_scanning = false;   // re-entrancy guard while pumping events mid-scan
-    QList<Track> m_pendingImports;   // importTracks() calls deferred while scanning
-    // Resume-table ops that arrived mid-scan (their transactions would nest inside
-    // the scan's). Replayed in order once the scan's transaction closes.
-    QList<std::function<void()>> m_deferredImports;
+    // Rejects a re-entrant scan() re-delivered while scan() pumps the event loop.
+    // Other DB slots ignore it: the scan ends its transaction around each pump, so
+    // a slot delivered there runs its own transaction without nesting.
+    bool m_scanning = false;
     QTimer *m_importRefreshTimer = nullptr;   // coalesces libraryLoaded during import
     QAtomicInt m_cancel{0};
     QThreadPool m_pool;   // dedicated pool for parsing; cap set per scan

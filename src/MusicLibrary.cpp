@@ -55,6 +55,34 @@ int progressEvery()
 // A file that needs (re)parsing, plus the freshly parsed result.
 struct ScanItem { QString path; qint64 mtime; QString sourceLabel; };
 struct ParsedRow { Track track; qint64 mtime; };
+
+// Upsert for a remote (streamed) row, shared by the three remote sources:
+// yt-dlp imports (importTracks/commitImportedTrack, mtime=0) and Subsonic sync
+// (mtime=sync epoch, so the prune can spot rows not seen this pass). Keeping the
+// SQL and the bind order in one place is what stops the three from drifting when a
+// column is added. Each caller still owns its own transaction.
+constexpr const char *kRemoteUpsertSql =
+    "INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
+    "duration, track_no, year, art_url) VALUES(?,NULL,1,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT(uri) DO UPDATE SET mtime=excluded.mtime, "
+    "artist=excluded.artist, title=excluded.title, album=excluded.album, "
+    "duration=excluded.duration, track_no=excluded.track_no, "
+    "year=excluded.year, art_url=excluded.art_url";
+
+// Binds one remote Track for kRemoteUpsertSql. Empty artist/art_url become NULL
+// (genuinely unknown, e.g. a YouTube video with no artist tag) rather than "".
+void bindRemoteTrack(QSqlQuery &q, const Track &t, qint64 mtime)
+{
+    q.addBindValue(t.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
+    q.addBindValue(mtime);
+    q.addBindValue(t.artist.isEmpty() ? QVariant() : QVariant(t.artist));
+    q.addBindValue(t.title);
+    q.addBindValue(t.album);
+    q.addBindValue(t.durationMs);
+    q.addBindValue(t.trackNo);
+    q.addBindValue(t.year);
+    q.addBindValue(t.artUrl.isEmpty() ? QVariant() : QVariant(t.artUrl));
+}
 }
 
 MusicLibrary::MusicLibrary(QObject *parent)
@@ -400,15 +428,6 @@ void MusicLibrary::importTracks(const QList<Track> &tracks)
     if (tracks.isEmpty())
         return;
 
-    // A cold scan pumps the worker event loop mid-transaction (see scan()), so this
-    // slot can land while the scan's batch transaction is open. SQLite has no nested
-    // transactions — committing here would close the scan's batch early. Defer the
-    // import; flushPendingImports() drains it once the scan finishes.
-    if (m_scanning) {
-        m_pendingImports += tracks;
-        return;
-    }
-
     if (!ensureDb())
         return;
 
@@ -422,10 +441,6 @@ void MusicLibrary::removeTracks(const QStringList &uris)
 {
     if (uris.isEmpty() || !ensureDb())
         return;
-    if (m_scanning) {   // a DELETE/commit would nest inside the scan's transaction
-        m_deferredImports.append([=] { removeTracks(uris); });
-        return;
-    }
     m_db.transaction();
     QSqlQuery q(m_db);
     q.prepare("DELETE FROM tracks WHERE uri=? AND remote=1");
@@ -443,10 +458,6 @@ void MusicLibrary::cancelAllImports(bool removeTracks)
 {
     if (!ensureDb())
         return;
-    if (m_scanning) {   // run after the scan's transaction (and any queued commits) close
-        m_deferredImports.append([=] { cancelAllImports(removeTracks); });
-        return;
-    }
     // The tracks this import committed (track_uri is set on each imported row).
     QStringList uris;
     QSqlQuery sel(m_db);
@@ -478,31 +489,14 @@ void MusicLibrary::syncSubsonic(const QString &serverId, const QList<Track> &tra
 {
     if (!ensureDb())
         return;
-    if (m_scanning) {   // ride after the scan's transaction closes
-        m_deferredImports.append([=] { syncSubsonic(serverId, tracks, epoch, finalPrune); });
-        return;
-    }
     if (!tracks.isEmpty()) {
         m_db.transaction();
         QSqlQuery q(m_db);
         // remote=1, path NULL (folder scan ignores it); mtime = sync epoch (so the prune
         // can tell which rows were seen this pass); art_url = deferred cover token.
-        q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
-                  "duration, track_no, year, art_url) VALUES(?,NULL,1,?,?,?,?,?,?,?,?) "
-                  "ON CONFLICT(uri) DO UPDATE SET mtime=excluded.mtime, "
-                  "artist=excluded.artist, title=excluded.title, album=excluded.album, "
-                  "duration=excluded.duration, track_no=excluded.track_no, "
-                  "year=excluded.year, art_url=excluded.art_url");
+        q.prepare(kRemoteUpsertSql);
         for (const Track &t : tracks) {
-            q.addBindValue(t.url.toString(QUrl::FullyEncoded));
-            q.addBindValue(epoch);
-            q.addBindValue(t.artist.isEmpty() ? QVariant() : QVariant(t.artist));
-            q.addBindValue(t.title);
-            q.addBindValue(t.album);
-            q.addBindValue(t.durationMs);
-            q.addBindValue(t.trackNo);
-            q.addBindValue(t.year);
-            q.addBindValue(t.artUrl.isEmpty() ? QVariant() : QVariant(t.artUrl));
+            bindRemoteTrack(q, t, epoch);
             if (!q.exec())
                 qWarning() << "[subsonic] upsert failed:" << q.lastError().text();
         }
@@ -535,44 +529,13 @@ void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
 {
     m_db.transaction();
     QSqlQuery q(m_db);
-    q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
-              "duration, track_no, year, art_url) VALUES(?,NULL,1,0,?,?,?,?,?,?,?) "
-              "ON CONFLICT(uri) DO UPDATE SET "
-              "artist=excluded.artist, title=excluded.title, album=excluded.album, "
-              "duration=excluded.duration, track_no=excluded.track_no, "
-              "year=excluded.year, art_url=excluded.art_url");
+    q.prepare(kRemoteUpsertSql);
     for (const Track &t : tracks) {
-        q.addBindValue(t.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
-        // Store NULL (not "") for a missing artist, e.g. a YouTube video with no
-        // artist tag, so it reads as genuinely unknown rather than blank.
-        q.addBindValue(t.artist.isEmpty() ? QVariant() : QVariant(t.artist));
-        q.addBindValue(t.title);
-        q.addBindValue(t.album);
-        q.addBindValue(t.durationMs);
-        q.addBindValue(t.trackNo);
-        q.addBindValue(t.year);
-        q.addBindValue(t.artUrl);
+        bindRemoteTrack(q, t, /*mtime=*/0);   // yt-dlp remote rows carry no mtime
         if (!q.exec())
             qWarning() << "insert remote row failed:" << q.lastError().text();
     }
     m_db.commit();
-}
-
-void MusicLibrary::flushPendingImports()
-{
-    // m_scanning is already false here, so the replayed ops run their own
-    // transactions normally rather than re-deferring. Move-out guards re-entrancy.
-    if (!m_pendingImports.isEmpty()) {
-        const QList<Track> pending = std::move(m_pendingImports);
-        m_pendingImports.clear();
-        importTracks(pending);
-    }
-    if (!m_deferredImports.isEmpty()) {
-        const QList<std::function<void()>> ops = std::move(m_deferredImports);
-        m_deferredImports.clear();
-        for (const auto &op : ops)
-            op();
-    }
 }
 
 void MusicLibrary::scheduleImportRefresh()
@@ -587,11 +550,6 @@ void MusicLibrary::beginImportJob(const QString &jobId, const QString &createNam
 {
     if (entryUrls.isEmpty() || !ensureDb())
         return;
-    if (m_scanning) {
-        m_deferredImports.append(
-            [=] { beginImportJob(jobId, createName, appendName, entryUrls); });
-        return;
-    }
     m_db.transaction();
     QSqlQuery q(m_db);
     q.prepare("INSERT OR IGNORE INTO imports_resume"
@@ -615,31 +573,14 @@ void MusicLibrary::commitImportedTrack(const QString &jobId, const QString &entr
 {
     if (!ensureDb())
         return;
-    if (m_scanning) {
-        m_deferredImports.append(
-            [=] { commitImportedTrack(jobId, entryUrl, track); });
-        return;
-    }
     // Upsert the track and clear its resume row in one transaction: a crash can never
     // leave a track inserted-but-still-pending or a row cleared-but-not-inserted.
-    // (Inlined rather than insertRemoteRows() so it shares this one transaction —
-    // that helper manages its own, and SQLite has no nested transactions.)
+    // (Uses kRemoteUpsertSql but keeps its own transaction so the track-insert and the
+    // resume-row update below commit atomically — SQLite has no nested transactions.)
     m_db.transaction();
     QSqlQuery ins(m_db);
-    ins.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
-                "duration, track_no, year, art_url) VALUES(?,NULL,1,0,?,?,?,?,?,?,?) "
-                "ON CONFLICT(uri) DO UPDATE SET "
-                "artist=excluded.artist, title=excluded.title, album=excluded.album, "
-                "duration=excluded.duration, track_no=excluded.track_no, "
-                "year=excluded.year, art_url=excluded.art_url");
-    ins.addBindValue(track.url.toString(QUrl::FullyEncoded));   // uri = Track::key()
-    ins.addBindValue(track.artist.isEmpty() ? QVariant() : QVariant(track.artist));
-    ins.addBindValue(track.title);
-    ins.addBindValue(track.album);
-    ins.addBindValue(track.durationMs);
-    ins.addBindValue(track.trackNo);
-    ins.addBindValue(track.year);
-    ins.addBindValue(track.artUrl);
+    ins.prepare(kRemoteUpsertSql);
+    bindRemoteTrack(ins, track, /*mtime=*/0);
     if (!ins.exec())
         qWarning() << "[import] commit track failed:" << ins.lastError().text();
 
@@ -674,10 +615,6 @@ void MusicLibrary::failImportEntries(const QString &jobId, const QStringList &en
 {
     if (entryUrls.isEmpty() || !ensureDb())
         return;
-    if (m_scanning) {
-        m_deferredImports.append([=] { failImportEntries(jobId, entryUrls); });
-        return;
-    }
     int dropped = 0;
     m_db.transaction();
     for (const QString &url : entryUrls) {
@@ -764,10 +701,6 @@ void MusicLibrary::loadPendingImports()
 {
     if (!ensureDb())
         return;
-    if (m_scanning) {   // finalize/replay below would nest in the scan's transaction
-        m_deferredImports.append([this] { loadPendingImports(); });
-        return;
-    }
     QSqlQuery jobs(m_db);
     if (!jobs.exec("SELECT DISTINCT job_id FROM imports_resume"))
         return;
@@ -983,11 +916,12 @@ void MusicLibrary::scan(const QStringList &folders)
     if (m_scanning)
         return;
     m_scanning = true;
-    // On every exit path clear the guard *then* drain any imports that arrived while
-    // the scan held the transaction open (m_scanning is false again, so they run).
+    // Clear the guard on every exit path. The guard only rejects a re-entrant
+    // scan(); other DB slots don't consult it (the scan commits its transaction
+    // around every event pump, so they never nest — see the pump below).
     struct ScanGuard {
         MusicLibrary *self;
-        ~ScanGuard() { self->m_scanning = false; self->flushPendingImports(); }
+        ~ScanGuard() { self->m_scanning = false; }
     } scanGuard{this};
 
     m_cancel.storeRelaxed(0);
@@ -1093,8 +1027,14 @@ void MusicLibrary::scan(const QStringList &folders)
             }
             if (done % kPumpEvery == 0) {
                 // Let queued search/art requests on this worker run between
-                // batches instead of waiting for the whole scan to finish.
+                // batches. End the transaction around the pump: with no write
+                // transaction open, any import/sync/remove slot delivered here
+                // runs its own transaction normally (SQLite has no nested
+                // transactions), so those slots need no scan-aware deferral.
+                m_db.commit();
                 QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                m_db.transaction();
+                sinceCommit = 0;
             }
         }
         m_db.commit();

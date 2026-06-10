@@ -188,8 +188,13 @@ MainWindow::MainWindow(QWidget *parent)
                     setWindowTitle(cur.displayText());
                     showTrackInfo(cur);   // refresh the left info panel
                 }
-                emit enrichTrack(url.toLocalFile(), title, artist, album,
-                                 trackNo, durationMs);
+                // Only local rows are keyed by filesystem path; a remote URL's
+                // toLocalFile() is "", so enrichMetadata would UPDATE ... WHERE
+                // path='' and touch zero rows. Skip it — import already sets remote
+                // metadata, and player-resolved metadata for streams isn't persisted.
+                if (url.isLocalFile())
+                    emit enrichTrack(url.toLocalFile(), title, artist, album,
+                                     trackNo, durationMs);
             });
 
     // Keep the widgets and persisted settings in sync with the controller, no
