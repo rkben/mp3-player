@@ -1,0 +1,222 @@
+Pass 3 — re-evaluation at commit 70132cc (Opus 4.8, xhigh effort)
+
+Read every non-shader source file in the tree (ShaderArt.*, demo/, visualizer/
+excluded). This pass focuses on the code added since pass 2 (016b474): Subsonic
+(SubsonicClient.*), the yt-dlp layer (YtDlp.*, YtDlpManager.*, RemoteResolver
+reworked onto it), DiscordPresence.*, the import path (Importer.*, ImportDialog.*),
+TrackListModel.*, PlaylistEditorDialog.*, Logger.*, StatusStack.h — plus the
+cross-cutting logic that has accreted as those features landed.
+
+Headline: still high-quality, well-threaded, COW-aware, thoroughly commented code.
+The two prior passes are clearly absorbed. Nothing below is a crash or data-loss
+bug. The two themes worth acting on are (1) duplication across the new DB/import/
+art/JSON paths and (2) the cost of the libraryLoaded fan-out now that the library
+has multiple emitting sources (scan + import + Subsonic sync).
+
+================================================================================
+A — Shared logic & duplication (the dominant theme)
+================================================================================
+
+A1. Remote-row upsert written three times (highest-value dedup).
+The same `INSERT INTO tracks(...) ... ON CONFLICT(uri) DO UPDATE SET
+artist=excluded.artist, ..., art_url=excluded.art_url` appears in
+insertRemoteRows (MusicLibrary.cpp:534), commitImportedTrack (:629), and
+syncSubsonic (:490). The first two are *byte-identical* SQL AND an identical
+8-value bind sequence (uri, artist-or-NULL, title, album, duration, track_no,
+year, art_url); Subsonic differs only by binding mtime=epoch. This is exactly
+the triplet that drifts when a column is added. Extract a shared
+`static const char* kRemoteUpsertSql` + `static void bindRemoteTrack(QSqlQuery&,
+const Track&)`. Each caller keeps its own transaction()/commit() (the reason
+commitImportedTrack is inlined today — it shares a txn with the resume-row
+update) but shares the string and binds. ~30 lines and a drift class gone.
+
+A2. Row->Track mapping duplicated.
+loadAll (MusicLibrary.cpp:264) and search (:956) read the same columns in the
+same order and both apply `if (t.title.isEmpty() && !remote) t.title =
+completeBaseName()`. salvageRemoteRows (:214) is a third, read-by-name variant.
+A `static Track trackFromRow(const QSqlQuery&)` collapses two and defines the
+column order once.
+
+A3. yt-dlp JSON + enumerate logic copied.
+Importer::firstOf (Importer.cpp:20) and ImportDialog::strOf (ImportDialog.cpp:154)
+are identical "first non-empty value among keys" helpers. The flat-playlist
+enumerate command + entry-parsing loop is written twice: ImportDialog::runCheck /
+onCheckDone (:146,:162) and Importer::startEnumerate / onEnumerateDone (:269,:277)
+build the same args and parse url/webpage_url/original_url + playlist title the
+same way. A shared YtDlp helper (enumerateArgs(url) + parseEntries(out,&title))
+unifies the probe both run.
+
+A4. Art dir + cover-cache key recomputed in several places.
+`<AppData>/art` is derived independently in MusicLibrary::ensureDb (:93), the
+Importer ctor (:119), and MainWindow::resolveSubsonicCover (:714). The
+"art dir + SHA1(hex) + ext" cache-key pattern recurs in extractArt,
+Importer::startCover, and resolveSubsonicCover. A tiny AppPaths::artDir() (and
+cachedArtPath(key,ext)) removes the drift risk.
+
+A5. Subsonic cover-token format split across two files.
+Built in SubsonicClient ("subsonic-cover:%1:%2", :323), hand-parsed in
+MainWindow::resolveSubsonicCover (:705). Put coverToken()/parseCoverToken() on
+SubsonicClient so the format lives next to what mints it.
+
+A6. "keep-first by artist+title" dedup exists three ways.
+applyPreferHq (PlayerController.cpp:35, key artist\x1f title lowercased),
+PlaylistEditorDialog::deduplicate (:280, same idea), and the importer's
+m_seenUris. The first two could share a Track::groupKey()/dedupKey() — which also
+fixes A7.
+
+A7. Style nit in that dedup key.
+PlaylistEditorDialog.cpp:288 embeds a raw 0x1f byte inside QLatin1Char('...')
+(confirmed via cat -A: '^_'). Works, but invisible in an editor and ungreppable.
+Use QChar(0x1f) to match PlayerController.cpp:50, or '\x1f'.
+
+A8. "Small hint label" recipe repeated ~5x in SettingsDialog.cpp.
+`QFont f = w->font(); f.setPointSize(qMax(1, f.pointSize()-1)); w->setFont(f)` for
+hqHint, ytManagedHint, sources, syncHint, the Subsonic hint. A local
+`auto makeHint = [](const QString&){...}` collapses them.
+
+================================================================================
+B — Simplification (one with real leverage)
+================================================================================
+
+B1. Drop the entire mid-scan deferral apparatus by committing before pumping.
+scan() holds a write transaction open and calls processEvents() every 250 files
+(MusicLibrary.cpp:1094). Because a queued DB-writing slot can fire during that
+pump and SQLite has no nested transactions, a large guard has grown: m_scanning
++ m_pendingImports + m_deferredImports + flushPendingImports() + the ScanGuard,
+and EIGHT copies of `if (m_scanning) { m_deferredImports.append([=]{...}); return;
+}` (importTracks, removeTracks, syncSubsonic, beginImportJob, commitImportedTrack,
+failImportEntries, cancelAllImports, loadPendingImports). Every new DB slot must
+remember the prologue — fragile.
+
+Simpler: end the transaction around the pump:
+
+    if (done % kPumpEvery == 0) {
+        m_db.commit();
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        m_db.transaction();
+        sinceCommit = 0;
+    }
+
+With no transaction open during the pump, every import/sync slot just runs its own
+transaction normally — so m_scanning, both pending lists, flushPendingImports, the
+ScanGuard, and all eight prologues can be deleted. The prepared `up` statement
+survives commit/transaction; the code already commits every 1000 rows and appends
+incrementally, so the finer commit cadence changes nothing observable. Largest net
+simplification available, and it removes the only soundness wrinkle pass 2 found
+(importTracks committing mid-scan).
+
+B2. m_autoSync is still a hidden, non-functional stub.
+Persists library/autoSync, hidden in the UI (SettingsDialog.cpp:543), feeds only a
+"// placeholder for now" line (MainWindow.cpp:1213). "Sync now" already exists —
+either wire an auto-sync timer (small) or delete the setting; a dead persisted
+toggle invites confusion. (Carryover from pass 2's note.)
+
+B3. MainWindow is 2,189 lines; the virtual-tree builder is a self-contained
+~250-line unit with no real coupling beyond m_fullLibrary/m_libIndexByKey:
+rebuildTree / populateNode / appendRemoteNode / appendSubsonicNodes /
+refreshRemoteNode / keysForIndex (+ the TreeRole enum and isLeafNode). Extracting
+a LibraryTreeModel/LibraryTreeBuilder shrinks the window class and makes the
+Remote/Subsonic node logic testable. Optional, but it's where the file's weight is.
+
+================================================================================
+C — Correctness & robustness (all minor)
+================================================================================
+
+C1. Remote tracks fire a no-op DB write on every play.
+The metadataResolved handler does `emit enrichTrack(url.toLocalFile(), ...)`
+(MainWindow.cpp:191); for a remote track toLocalFile() is "", so enrichMetadata
+runs `UPDATE ... WHERE path = ''` against rows whose path is NULL — zero rows,
+every play. Harmless but pointless worker churn. Guard with `if (url.isLocalFile())`
+before emitting (and decide deliberately that player-resolved metadata for remote
+streams is therefore never persisted — fine, import sets it).
+
+C2. Resuming the cached queue silently applies Prefer-HQ dedup.
+On launch onLibraryLoaded calls m_controller->enqueue(resumed) (:1288), and
+enqueue runs applyPreferHq (PlayerController.cpp:297). With Prefer-HQ on, a
+restored queue that contained duplicates comes back shorter/different than saved.
+Probably acceptable, but a surprise; consider resuming raw (bypass dedup on
+restore) or documenting it.
+
+C3. MPRIS CanPlay under-reports.
+MprisPlayerAdaptor::canPlay() returns queueSize() > 0 (MprisController.cpp:90),
+but play() cold-starts from m_readyQueue when the queue is empty, so a media-key
+Play works even when CanPlay says false. Same honest-interface spirit as the
+canGoPrevious note in pass 2 — cosmetic, Play() still functions.
+
+C4. onArtResolved decodes the info-panel cover twice.
+setCurrentArt already emits currentTrackChanged when art changes ->
+onCurrentTrackChanged -> showTrackInfo -> loadCover; then onArtResolved calls
+loadCover(artUrl) directly again (MainWindow.cpp:2159-2161). Idempotent, but a
+redundant synchronous QPixmap decode. Let the currentTrackChanged path own it.
+
+C5. DiscordPresence::tryConnect does synchronous waitForConnected(200) in a loop
+on the GUI thread (DiscordPresence.cpp:157). On Linux the candidate list is up to
+~90 paths (3 bases x 3 subdirs x 10). Missing sockets fail instantly so the normal
+case is cheap, but any candidate that accepts-then-stalls costs 200 ms of frozen
+UI each. An async connectToServer + connected/errorOccurred walk would be
+jank-proof. Low risk.
+
+================================================================================
+D — Optimization: the libraryLoaded fan-out at 45k
+================================================================================
+
+The library now has multiple sources (scan, yt-dlp import, Subsonic sync) all
+emitting libraryLoaded, and onLibraryLoaded does O(library) work each time.
+
+D1. Every libraryLoaded triggers a full reload + full UI rebuild (most impactful).
+MainWindow::onLibraryLoaded (:1271) rebuilds m_libIndexByKey (O(n)), calls
+refreshPlaylists() (disk I/O, see D2), and refreshRemoteNode() +
+appendSubsonicNodes() (rebuild the entire virtual tree, grouping all remote/
+Subsonic tracks into artist/album nodes). On the worker side each emit is a fresh
+loadAll() — a full SELECT ... ORDER BY over every row. During a Subsonic sync of a
+large server, scheduleImportRefresh fires this every ~300 ms (debounced) over a
+growing set approaching 45k rows: a full-table read + full tree rebuild several
+times a second by end of sync — the dominant hitch at scale. Targeted fix: keep
+the cheap debounced model refresh, but defer the expensive tree rebuild
+(refreshRemoteNode/appendSubsonicNodes) to syncFinished only, or rebuild it
+incrementally.
+
+D2. refreshPlaylists() re-reads every .m3u8 from disk on every libraryLoaded
+(:1833, called at :1278). Playlist files don't change during a scan/sync, so this
+is pure waste on the GUI thread at exactly the moments libraryLoaded fires most.
+It only needs to run when the playlist set changes or when durations first become
+resolvable. Decouple it from libraryLoaded.
+
+D3. loadCover decodes synchronously on the GUI thread (MainWindow.cpp:699;
+carryover from pass 2 #2 — still present). A large folder cover.jpg is a
+per-track-change hitch. Decode on the worker (it already touches these files in
+extractArt) or cache the scaled pixmap.
+
+D4. updateQueueTitle sums the whole queue on every queueChanged
+(totalDurationMs(m_controller->queue()), :1807). Building a large queue one
+"Add to queue" at a time is O(n^2) duration-summing on the GUI thread. The cache
+write is already debounced; this isn't. Cache a running total, or debounce the
+title refresh. (A single "Play library" is one playQueue -> one sum — fine.)
+
+================================================================================
+Quick reference (highest value first)
+================================================================================
+
+B1  Commit-around-pump -> delete the m_scanning/deferral system  MusicLibrary (~8 sites)  medium, high payoff
+A1  One shared remote-upsert SQL + bind helper                   MusicLibrary.cpp:490/534/629  small
+D1/D2 Defer tree rebuild + decouple refreshPlaylists             MainWindow.cpp:1271  small-medium
+A2/A3 Dedup row->Track and yt-dlp JSON/enumerate helpers          library + importer  small
+C1  Guard remote enrichTrack no-op                               MainWindow.cpp:191  trivial
+D3/D4 Off-thread cover decode; cached queue duration             MainWindow.cpp  small
+B2  Wire or remove library/autoSync stub                         settings  small
+
+Verified NOT bugs (checked deliberately):
+- SubsonicClient teardown is UAF-safe: getJson connects with the client as the
+  receiver context, so deleting the client (deleteLater on supersede/finish)
+  severs the reply connections; the ok/fail closures (capturing the client) never
+  fire post-delete.
+- Subsonic prune LIKE 'subsonic://<id>/%' is safe: id is a QUuid::Id128 hex string,
+  no LIKE metacharacters.
+- The YtDlp one-shot guard (shared_ptr<bool>) correctly mutes a superseded/cancelled
+  run so finished()/errorOccurred() can't double- or stale-fire.
+- Importer cover-in-flight after cancel is guarded by m_cancelled in both the cover
+  callback and emitImported, so no track is re-committed (and no resume row
+  re-created) after cancelAll().
+- QList<Track> through queued signals remains COW (pass 2 verified) — the repeated
+  libraryLoaded copies are O(1) until mutated; D1's cost is loadAll() + the UI
+  rebuild, not the cross-thread copy.
