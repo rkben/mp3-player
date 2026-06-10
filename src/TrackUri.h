@@ -13,7 +13,8 @@ inline QUrl urlFromStored(const QString &line)
     const QString s = line.trimmed();
     if (s.startsWith(QLatin1String("http://"), Qt::CaseInsensitive)
         || s.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)
-        || s.startsWith(QLatin1String("file://"), Qt::CaseInsensitive))
+        || s.startsWith(QLatin1String("file://"), Qt::CaseInsensitive)
+        || s.startsWith(QLatin1String("subsonic://"), Qt::CaseInsensitive))
         return QUrl(s);
     return QUrl::fromLocalFile(s);
 }

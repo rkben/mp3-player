@@ -31,6 +31,10 @@
 
 #include "YtDlpManager.h"
 #include "YtDlp.h"
+#include "SubsonicClient.h"
+
+#include <QListWidget>
+#include <QSignalBlocker>
 
 SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
                                bool restoreQueue, bool autoPlay,
@@ -129,6 +133,16 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         addFolderRow(f);   // m_folderTable exists once buildLibraryTab has run
     m_libraryPage = scrollable(library);
     tabs->addTab(m_libraryPage, tr("Library"));
+
+    // ---- Subsonic tab ----
+    {
+        auto *page = new QWidget;
+        auto *l = new QVBoxLayout(page);
+        l->addWidget(buildSubsonicGroup());
+        l->addStretch(1);
+        tabs->addTab(scrollable(page), tr("Subsonic"));
+    }
+
     tabs->addTab(scrollable(buildLogTab()), tr("Log"));
     tabs->addTab(scrollable(buildAboutTab()), tr("About"));
     tabs->setCurrentIndex(0);   // open on General
@@ -144,6 +158,11 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         s.setValue(QStringLiteral("ytdlp/useManaged"), m_ytUseManaged->isChecked());
         s.setValue(QStringLiteral("playback/preferHq"),
                    m_preferHqCombo->currentData().toInt());
+    });
+    // Persist the Subsonic server list on OK.
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        ssCommitFields();
+        SubsonicClient::saveServers(m_subsonicServers);
     });
 #ifdef HAVE_DISCORD_RPC
     // Persist the Discord override on OK (this field doesn't round-trip via the host).
@@ -697,4 +716,192 @@ void SettingsDialog::removeFolder()
     const int r = m_folderTable->currentRow();
     if (r >= 0)
         m_folderTable->removeRow(r);
+}
+
+// --- Subsonic servers (multi-server list + edit fields + Test) ------------------
+
+static QString ssLabel(const SubsonicServer &sv)
+{
+    if (!sv.name.isEmpty())
+        return sv.name;
+    const QString host = QUrl(sv.url).host();
+    return host.isEmpty() ? SettingsDialog::tr("New server") : host;
+}
+
+// A usable server base URL: an explicit http/https scheme and a host. We don't guess a
+// scheme — the user enters the full URL (e.g. http://host:4533).
+static bool ssUrlValid(const QString &raw)
+{
+    const QUrl u(raw.trimmed());
+    return (u.scheme() == QLatin1String("http") || u.scheme() == QLatin1String("https"))
+        && !u.host().isEmpty();
+}
+
+QWidget *SettingsDialog::buildSubsonicGroup()
+{
+    m_subsonicServers = SubsonicClient::servers();
+
+    auto *box = new QGroupBox(tr("Subsonic servers"));
+    auto *outer = new QVBoxLayout(box);
+    outer->setSpacing(8);
+
+    auto *hint = new QLabel(tr("Stream from Subsonic / OpenSubsonic servers (Navidrome, "
+                               "Airsonic, …); their libraries sync into yours."));
+    hint->setWordWrap(true);
+    { QFont f = hint->font(); f.setPointSize(qMax(1, f.pointSize() - 1)); hint->setFont(f); }
+    outer->addWidget(hint);
+
+    m_ssList = new QListWidget;
+    m_ssList->setMaximumHeight(110);
+    outer->addWidget(m_ssList);
+
+    auto *listBtns = new QHBoxLayout;
+    auto *addBtn = new QPushButton(tr("Add"));
+    m_ssRemoveBtn = new QPushButton(tr("Remove"));
+    listBtns->addWidget(addBtn);
+    listBtns->addWidget(m_ssRemoveBtn);
+    listBtns->addStretch(1);
+    outer->addLayout(listBtns);
+
+    auto *form = new QFormLayout;
+    m_ssName = new QLineEdit;  m_ssName->setPlaceholderText(tr("My server"));
+    m_ssUrl  = new QLineEdit;  m_ssUrl->setPlaceholderText(tr("https://music.example.com"));
+    m_ssUser = new QLineEdit;
+    m_ssPass = new QLineEdit;  m_ssPass->setEchoMode(QLineEdit::Password);
+    form->addRow(tr("Name:"), m_ssName);
+    form->addRow(tr("URL:"), m_ssUrl);
+    form->addRow(tr("Username:"), m_ssUser);
+    form->addRow(tr("Password:"), m_ssPass);
+    outer->addLayout(form);
+
+    auto *testRow = new QHBoxLayout;
+    m_ssTestBtn = new QPushButton(tr("Test"));
+    auto *syncBtn = new QPushButton(tr("Sync now"));
+    syncBtn->setToolTip(tr("Save and sync this server's library into yours (runs in the "
+                           "background; you can close Settings)."));
+    m_ssStatus = new QLabel;
+    m_ssStatus->setWordWrap(true);
+    testRow->addWidget(m_ssTestBtn);
+    testRow->addWidget(syncBtn);
+    testRow->addWidget(m_ssStatus, 1);
+    outer->addLayout(testRow);
+
+    connect(m_ssList, &QListWidget::currentRowChanged, this, [this] { ssLoadSelected(); });
+    for (QLineEdit *e : {m_ssName, m_ssUrl, m_ssUser, m_ssPass})
+        connect(e, &QLineEdit::textEdited, this, [this] { ssCommitFields(); });
+    connect(addBtn, &QPushButton::clicked, this, [this] { ssAddServer(); });
+    connect(m_ssRemoveBtn, &QPushButton::clicked, this, [this] { ssRemoveServer(); });
+    connect(m_ssTestBtn, &QPushButton::clicked, this, [this] { ssTestSelected(); });
+    connect(syncBtn, &QPushButton::clicked, this, [this] { ssSyncNow(); });
+
+    for (const SubsonicServer &sv : m_subsonicServers)
+        m_ssList->addItem(ssLabel(sv));
+    if (!m_subsonicServers.isEmpty())
+        m_ssList->setCurrentRow(0);
+    else
+        ssLoadSelected();   // disables the fields when there's nothing selected
+    return box;
+}
+
+void SettingsDialog::ssLoadSelected()
+{
+    const int row = m_ssList->currentRow();
+    const bool ok = row >= 0 && row < m_subsonicServers.size();
+    for (QLineEdit *e : {m_ssName, m_ssUrl, m_ssUser, m_ssPass})
+        e->setEnabled(ok);
+    m_ssRemoveBtn->setEnabled(ok);
+    m_ssTestBtn->setEnabled(ok);
+    m_ssStatus->clear();
+    if (!ok) {
+        for (QLineEdit *e : {m_ssName, m_ssUrl, m_ssUser, m_ssPass})
+            e->clear();
+        return;
+    }
+    const SubsonicServer &sv = m_subsonicServers.at(row);
+    m_ssName->setText(sv.name);     // setText doesn't emit textEdited, so no commit loop
+    m_ssUrl->setText(sv.url);
+    m_ssUser->setText(sv.user);
+    m_ssPass->setText(sv.password);
+}
+
+void SettingsDialog::ssCommitFields()
+{
+    const int row = m_ssList->currentRow();
+    if (row < 0 || row >= m_subsonicServers.size())
+        return;
+    SubsonicServer &sv = m_subsonicServers[row];
+    sv.name = m_ssName->text().trimmed();
+    sv.url = m_ssUrl->text().trimmed();
+    sv.user = m_ssUser->text().trimmed();
+    sv.password = m_ssPass->text();
+    if (auto *it = m_ssList->item(row))
+        it->setText(ssLabel(sv));
+}
+
+void SettingsDialog::ssAddServer()
+{
+    SubsonicServer sv;
+    sv.id = SubsonicClient::newId();
+    sv.name = tr("New server");
+    m_subsonicServers.append(sv);
+    m_ssList->addItem(ssLabel(sv));
+    m_ssList->setCurrentRow(m_ssList->count() - 1);
+    m_ssName->setFocus();
+    m_ssName->selectAll();
+}
+
+void SettingsDialog::ssRemoveServer()
+{
+    const int row = m_ssList->currentRow();
+    if (row < 0 || row >= m_subsonicServers.size())
+        return;
+    m_subsonicServers.removeAt(row);
+    delete m_ssList->takeItem(row);   // currentRowChanged -> ssLoadSelected
+}
+
+void SettingsDialog::ssSyncNow()
+{
+    ssCommitFields();
+    const int row = m_ssList->currentRow();
+    if (row < 0 || row >= m_subsonicServers.size())
+        return;
+    if (!m_subsonicServers.at(row).valid()) {
+        m_ssStatus->setText(tr("Fill in URL, username and password first."));
+        return;
+    }
+    if (!ssUrlValid(m_subsonicServers.at(row).url)) {
+        m_ssStatus->setText(tr("Enter a full URL including http:// or https:// "
+                               "(e.g. http://host:4533)."));
+        return;
+    }
+    // Persist now so the host can look the server up by id and sync it in the background.
+    SubsonicClient::saveServers(m_subsonicServers);
+    m_ssStatus->setText(tr("Syncing in the background…"));
+    emit subsonicSyncRequested(m_subsonicServers.at(row).id);
+}
+
+void SettingsDialog::ssTestSelected()
+{
+    ssCommitFields();
+    const int row = m_ssList->currentRow();
+    if (row < 0 || row >= m_subsonicServers.size())
+        return;
+    if (!m_subsonicServers.at(row).valid()) {
+        m_ssStatus->setText(tr("Fill in URL, username and password first."));
+        return;
+    }
+    if (!ssUrlValid(m_subsonicServers.at(row).url)) {
+        m_ssStatus->setText(tr("Enter a full URL including http:// or https:// "
+                               "(e.g. http://host:4533)."));
+        return;
+    }
+    m_ssStatus->setText(tr("Testing…"));
+    m_ssTestBtn->setEnabled(false);
+    auto *client = new SubsonicClient(m_subsonicServers.at(row), this);
+    connect(client, &SubsonicClient::pinged, this, [this, client](bool ok, const QString &msg) {
+        m_ssStatus->setText(ok ? tr("✓ %1").arg(msg) : tr("✗ %1").arg(msg));
+        m_ssTestBtn->setEnabled(true);
+        client->deleteLater();
+    });
+    client->ping();
 }

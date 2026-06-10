@@ -27,6 +27,9 @@ struct Track {
     // DB key, the model row index, and the MPRIS track id.
     QString key() const { return url.toString(QUrl::FullyEncoded); }
     bool isRemote() const { return !url.isLocalFile(); }
+    // A Subsonic-server track (subsonic://<serverId>/<songId>): remote, but its stream
+    // URL is built synchronously from config — no yt-dlp resolve/prefetch needed.
+    bool isSubsonic() const { return url.scheme() == QLatin1String("subsonic"); }
 
     // Overlay non-empty/positive fields from `other` onto this track, leaving the
     // rest intact. Returns true if anything actually changed. Shared by the model

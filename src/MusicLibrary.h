@@ -91,6 +91,12 @@ public slots:
     // also delete the tracks committed by those jobs (rollback). Emits importsCancelled.
     void cancelAllImports(bool removeTracks);
 
+    // Upsert a batch of a Subsonic server's tracks (remote rows; mtime carries the sync
+    // `epoch` so a final prune can drop this server's rows not seen this sync). `art_url`
+    // holds a deferred "subsonic-cover:…" token resolved lazily on display.
+    void syncSubsonic(const QString &serverId, const QList<Track> &tracks,
+                      qint64 epoch, bool finalPrune);
+
 signals:
     void libraryLoaded(const QList<Track> &tracks);   // full replace (cache + final)
     void tracksAppended(const QList<Track> &tracks);  // incremental, during cold scan
@@ -109,6 +115,7 @@ signals:
                            const QList<Track> &tracks);
     void importEntriesDropped(int count);   // entries given up on (toast)
     void importsCancelled(int trackCount, bool removed);   // cancel done (toast)
+    void subsonicSynced(const QString &serverId, int trackCount);   // sync done (toast)
 
 private:
     bool ensureDb();

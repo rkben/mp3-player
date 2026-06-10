@@ -26,6 +26,8 @@ class QListWidget;
 class QMenu;
 class CoverLabel;
 class StatusStack;
+class SubsonicClient;
+class QNetworkAccessManager;
 class PlayerController;
 class MusicLibrary;
 class MediaSession;
@@ -54,6 +56,9 @@ signals:
     void importTracks(const QList<Track> &tracks);   // -> library worker
     void removeTracks(const QStringList &uris);      // -> library worker (Remote tree)
     void cancelImports(bool removeTracks);           // -> library worker (clear resume)
+    // -> library worker: upsert a Subsonic sync batch (finalPrune drops stale rows)
+    void syncSubsonicBatch(const QString &serverId, const QList<Track> &tracks,
+                           qint64 epoch, bool finalPrune);
 
 private slots:
     void openSettings(bool startOnLibrary = false);
@@ -68,6 +73,7 @@ private slots:
     void createPlaylist();     // Playlists tab: make a new empty playlist
     void importFromUrl();      // Playlists tab: yt-dlp import modal
     void cancelActiveImport(); // status-row ✕: stop import, ask Keep/Remove
+    void startSubsonicSync(const QString &serverId);   // background sync (from Settings)
     void onCurrentTrackChanged(const Track &track);
     void onQueueChanged(const QList<Track> &queue);
     void onPlaybackStateChanged(bool playing);
@@ -105,6 +111,7 @@ private:
     void loadPlaylist(const QString &name);   // resolve + play, set current playlist
     void setCurrentPlaylist(const QString &name, bool dirty);   // update header + persist
     void loadCover(const QString &artUrl);    // set the cover image (or placeholder)
+    void resolveSubsonicCover(const QString &token);   // fetch+cache a deferred cover
     void startLibraryThread();
     void restoreSettings();
     void saveUiState() const;      // window geometry, splitter sizes, column widths
@@ -117,6 +124,7 @@ private:
     void rebuildTree();                       // Files tab: Remote node + folder roots
     void populateNode(QStandardItem *item);   // lazily fill a dir node's children
     void appendRemoteNode();                  // Library tree: "Remote" host/playlist tree
+    void appendSubsonicNodes();               // Library tree: a "Subsonic" source per server
     void refreshRemoteNode();                 // replace just the Remote root
     // Stored keys (paths or URLs) a tree node resolves to: a filesystem node walks
     // its folder; a virtual leaf is its own key; a virtual group gathers descendants.
@@ -135,6 +143,9 @@ private:
     MusicLibrary *m_library = nullptr;
     QThread *m_libThread = nullptr;
     Importer *m_importer = nullptr;
+    SubsonicClient *m_subsonicSync = nullptr;   // active background Subsonic sync (or null)
+    QNetworkAccessManager *m_coverNet = nullptr;   // lazy Subsonic cover-art downloads
+    QString m_currentCoverToken;   // guards a late cover download against a track switch
     MediaSession *m_session = nullptr;   // OS media-session bridge (null if none)
     class YtDlpManager *m_ytdlp = nullptr;   // managed yt-dlp binary (download/update)
 #ifdef HAVE_DISCORD_RPC

@@ -473,6 +473,64 @@ void MusicLibrary::cancelAllImports(bool removeTracks)
     emit importsCancelled(int(uris.size()), removeTracks);
 }
 
+void MusicLibrary::syncSubsonic(const QString &serverId, const QList<Track> &tracks,
+                                qint64 epoch, bool finalPrune)
+{
+    if (!ensureDb())
+        return;
+    if (m_scanning) {   // ride after the scan's transaction closes
+        m_deferredImports.append([=] { syncSubsonic(serverId, tracks, epoch, finalPrune); });
+        return;
+    }
+    if (!tracks.isEmpty()) {
+        m_db.transaction();
+        QSqlQuery q(m_db);
+        // remote=1, path NULL (folder scan ignores it); mtime = sync epoch (so the prune
+        // can tell which rows were seen this pass); art_url = deferred cover token.
+        q.prepare("INSERT INTO tracks(uri, path, remote, mtime, artist, title, album, "
+                  "duration, track_no, year, art_url) VALUES(?,NULL,1,?,?,?,?,?,?,?,?) "
+                  "ON CONFLICT(uri) DO UPDATE SET mtime=excluded.mtime, "
+                  "artist=excluded.artist, title=excluded.title, album=excluded.album, "
+                  "duration=excluded.duration, track_no=excluded.track_no, "
+                  "year=excluded.year, art_url=excluded.art_url");
+        for (const Track &t : tracks) {
+            q.addBindValue(t.url.toString(QUrl::FullyEncoded));
+            q.addBindValue(epoch);
+            q.addBindValue(t.artist.isEmpty() ? QVariant() : QVariant(t.artist));
+            q.addBindValue(t.title);
+            q.addBindValue(t.album);
+            q.addBindValue(t.durationMs);
+            q.addBindValue(t.trackNo);
+            q.addBindValue(t.year);
+            q.addBindValue(t.artUrl.isEmpty() ? QVariant() : QVariant(t.artUrl));
+            if (!q.exec())
+                qWarning() << "[subsonic] upsert failed:" << q.lastError().text();
+        }
+        m_db.commit();
+        scheduleImportRefresh();   // trickle results into the UI (debounced)
+    }
+
+    if (finalPrune) {
+        m_db.transaction();
+        QSqlQuery del(m_db);   // drop this server's rows not touched this sync
+        del.prepare("DELETE FROM tracks WHERE remote=1 AND uri LIKE ? AND mtime<>?");
+        del.addBindValue(QStringLiteral("subsonic://%1/%").arg(serverId));
+        del.addBindValue(epoch);
+        del.exec();
+        m_db.commit();
+
+        QSqlQuery cnt(m_db);
+        int n = 0;
+        cnt.prepare("SELECT COUNT(*) FROM tracks WHERE remote=1 AND uri LIKE ?");
+        cnt.addBindValue(QStringLiteral("subsonic://%1/%").arg(serverId));
+        if (cnt.exec() && cnt.next())
+            n = cnt.value(0).toInt();
+        qInfo("[subsonic] sync done for %s — %d track(s)", qPrintable(serverId), n);
+        emit libraryLoaded(loadAll(nullptr));
+        emit subsonicSynced(serverId, n);
+    }
+}
+
 void MusicLibrary::insertRemoteRows(const QList<Track> &tracks)
 {
     m_db.transaction();

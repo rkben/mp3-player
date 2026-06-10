@@ -24,3 +24,7 @@ notes/fixins_new.md
 notes/new_remote_sources.md
 .DS_Store
 aqtinstall.log
+
+# Local secrets (e.g. .secret INI with a Subsonic/Navidrome server for testing)
+.secret
+*.secret

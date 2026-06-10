@@ -4,12 +4,14 @@
 
 #include "Theme.h"
 #include "LibraryFolder.h"
+#include "SubsonicClient.h"   // SubsonicServer
 
 class QLineEdit;
 class QCheckBox;
 class QComboBox;
 class QPushButton;
 class QTableWidget;
+class QListWidget;
 class QPlainTextEdit;
 class QTabWidget;
 class QWidget;
@@ -53,6 +55,9 @@ signals:
     void themeChanged(Theme::Mode mode, const QString &file);
     // Emitted on output-device selection so the host can switch audio immediately.
     void audioDeviceChanged(const QByteArray &id);
+    // Emitted when "Sync now" is clicked for a saved Subsonic server (the host owns the
+    // background sync so it continues after the dialog closes).
+    void subsonicSyncRequested(const QString &serverId);
 #ifdef HAVE_DISCORD_RPC
     // Emitted on the Discord enable toggle, applied live by the host.
     void discordEnabledChanged(bool on);
@@ -66,6 +71,14 @@ private:
     void onThemeRowChanged();
     void refreshYtStatus(const QString &override = QString());   // override = transient text
     void updateYtPathField();   // show effective path; disable when managed is on
+
+    QWidget *buildSubsonicGroup();   // multi-server list + edit fields + Test
+    void ssLoadSelected();           // populate the edit fields from the selected server
+    void ssCommitFields();           // write the edit fields back into the working list
+    void ssAddServer();
+    void ssRemoveServer();
+    void ssTestSelected();           // ping the currently-edited server
+    void ssSyncNow();                // save + ask the host to sync the selected server
     QWidget *buildGeneralTab();
     QWidget *buildLibraryTab(bool autoSync);
     QWidget *buildLogTab();
@@ -94,6 +107,18 @@ private:
     QTabWidget *m_tabs = nullptr;
     QWidget *m_libraryPage = nullptr;   // the Library tab's scroll page, for selection
     bool m_resetRequested = false;
+
+    // Subsonic: a working copy of the configured servers, edited via the list + fields
+    // and saved (SubsonicClient::saveServers) on accept.
+    QList<SubsonicServer> m_subsonicServers;
+    QListWidget *m_ssList = nullptr;
+    QLineEdit *m_ssName = nullptr;
+    QLineEdit *m_ssUrl = nullptr;
+    QLineEdit *m_ssUser = nullptr;
+    QLineEdit *m_ssPass = nullptr;
+    QPushButton *m_ssRemoveBtn = nullptr;
+    QPushButton *m_ssTestBtn = nullptr;
+    QLabel *m_ssStatus = nullptr;
 #ifdef HAVE_DISCORD_RPC
     QCheckBox *m_discordEnabled = nullptr;
 #endif

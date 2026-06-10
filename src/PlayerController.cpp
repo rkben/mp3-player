@@ -1,6 +1,7 @@
 #include "PlayerController.h"
 #include "MediaEngine.h"
 #include "RemoteResolver.h"
+#include "SubsonicClient.h"
 
 #include <QThread>
 #include <QRandomGenerator>
@@ -193,6 +194,11 @@ void PlayerController::playInternal(int qindex)
     if (!t.isRemote()) {
         emit remoteResolving(false);
         emit engineLoad(t.url, /*autoplay=*/true);
+    } else if (t.isSubsonic()) {
+        // Subsonic: the stream URL is built synchronously from config — no resolve gap.
+        // An empty URL (server removed) lets the engine error through to skipBadTrack.
+        emit remoteResolving(false);
+        emit engineLoad(QUrl(SubsonicClient::streamUrl(t.url)), /*autoplay=*/true);
     } else if (t.url == m_prefetchUrl && !m_prefetchStream.isEmpty()) {
         // Prefetched and ready: hand the stream straight to the engine — no gap.
         emit remoteResolving(false);
@@ -251,8 +257,9 @@ void PlayerController::maybePrefetch()
     if (m_autoNext < 0 || m_autoNext >= m_queue.size())
         return;
     const Track &next = m_queue.at(m_autoNext);
-    if (!next.isRemote() || next.url == m_current.url || next.url == m_prefetchUrl)
-        return;   // local (no resolve needed), repeat-one's same track, or already going
+    if (!next.isRemote() || next.isSubsonic() || next.url == m_current.url
+        || next.url == m_prefetchUrl)
+        return;   // local/subsonic (no resolve gap), repeat-one's same track, or going
     m_prefetchUrl = next.url;
     m_prefetchStream = QUrl{};
     emit remotePrefetching(true);

@@ -13,6 +13,12 @@
 #include "Toast.h"
 #include "Notifier.h"
 #include "Importer.h"
+#include "SubsonicClient.h"
+
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QImage>
+#include <QCryptographicHash>
 #include "ImportDialog.h"
 #include "PlaylistEditorDialog.h"
 #include "YtDlpManager.h"
@@ -76,6 +82,7 @@ enum TreeRole {
     PopulatedRole,                 // bool: children have been lazily loaded
     KeyRole,                       // virtual-tree leaf: a track key (url string)
     IsGroupRole,                   // virtual-tree grouping node (artist/album/host)
+    GroupKeysRole,                 // QStringList: a lazy group's track keys (Subsonic album)
 };
 
 // A leaf is an enqueueable track: a virtual-tree leaf (carries a key) or a
@@ -280,6 +287,10 @@ void MainWindow::startLibraryThread()
     connect(m_library, &MusicLibrary::scanStatus, this, &MainWindow::onScanStatus);
     connect(this, &MainWindow::importTracks, m_library, &MusicLibrary::importTracks);
     connect(this, &MainWindow::removeTracks, m_library, &MusicLibrary::removeTracks);
+    connect(this, &MainWindow::syncSubsonicBatch, m_library, &MusicLibrary::syncSubsonic);
+    connect(m_library, &MusicLibrary::subsonicSynced, this, [](const QString &, int n) {
+        ToastArea::post(tr("Subsonic sync complete — %n track(s).", nullptr, n));
+    });
 
     m_libThread->start();
 
@@ -674,10 +685,67 @@ void MainWindow::showTrackInfo(const Track &t)
 
 void MainWindow::loadCover(const QString &artUrl)
 {
+    // A Subsonic cover is stored as a deferred "subsonic-cover:<server>:<id>" token —
+    // fetch+cache it on demand (placeholder until it arrives).
+    if (artUrl.startsWith(QLatin1String("subsonic-cover:"))) {
+        m_currentCoverToken = artUrl;
+        resolveSubsonicCover(artUrl);
+        return;
+    }
+    m_currentCoverToken.clear();
     if (artUrl.isEmpty())
         m_coverArt->setCover(QPixmap());   // -> placeholder
     else
         m_coverArt->setCover(QPixmap(QUrl(artUrl).toLocalFile()));
+}
+
+void MainWindow::resolveSubsonicCover(const QString &token)
+{
+    // token == "subsonic-cover:<serverId>:<coverId>"
+    const QString rest = token.mid(QStringLiteral("subsonic-cover:").size());
+    const int sep = rest.indexOf(':');
+    if (sep < 0) {
+        m_coverArt->setCover(QPixmap());
+        return;
+    }
+    const QString serverId = rest.left(sep);
+    const QString coverId = rest.mid(sep + 1);
+
+    const QString artDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                         + QStringLiteral("/art");
+    const QString out = artDir + '/'
+        + QString::fromLatin1(QCryptographicHash::hash(token.toUtf8(),
+                                  QCryptographicHash::Sha1).toHex()) + QStringLiteral(".jpg");
+
+    if (QFileInfo::exists(out)) {   // cached already
+        m_coverArt->setCover(QPixmap(out));
+        return;
+    }
+    m_coverArt->setCover(QPixmap());   // placeholder while it downloads
+
+    const SubsonicServer sv = SubsonicClient::server(serverId);
+    if (!sv.valid())
+        return;
+    if (!m_coverNet)
+        m_coverNet = new QNetworkAccessManager(this);
+    QDir().mkpath(artDir);
+    QNetworkReply *reply =
+        m_coverNet->get(QNetworkRequest(QUrl(SubsonicClient::coverArtUrl(sv, coverId))));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, out, token] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+            return;
+        const QByteArray data = reply->readAll();
+        if (data.isEmpty())
+            return;
+        QFile f(out);
+        if (f.open(QIODevice::WriteOnly)) {   // cache for next time (shared per album)
+            f.write(data);
+            f.close();
+        }
+        if (m_currentCoverToken == token)   // still the displayed track?
+            m_coverArt->setCover(QPixmap::fromImage(QImage::fromData(data)));
+    });
 }
 
 QWidget *MainWindow::buildTransportBar()
@@ -824,7 +892,8 @@ QWidget *MainWindow::buildTransportBar()
 void MainWindow::rebuildTree()
 {
     m_treeModel->clear();
-    appendRemoteNode();   // "Remote" virtual root on top, when remote tracks exist
+    appendRemoteNode();      // "Remote" virtual root (yt-dlp imports)
+    appendSubsonicNodes();   // a "Subsonic — <server>" source per configured server
     const QIcon dirIcon = style()->standardIcon(QStyle::SP_DirIcon);
 
     for (const LibraryFolder &f : m_folders) {
@@ -843,10 +912,28 @@ void MainWindow::rebuildTree()
 
 void MainWindow::populateNode(QStandardItem *item)
 {
-    // Only filesystem nodes are lazily populated; virtual nodes (Remote subtree)
-    // are built eagerly and carry no path, so leave them untouched.
-    if (!item || item->data(PopulatedRole).toBool()
-        || item->data(PathRole).toString().isEmpty())
+    if (!item || item->data(PopulatedRole).toBool())
+        return;
+
+    // Lazy Subsonic album node: build its track leaves from the stored keys.
+    const QStringList groupKeys = item->data(GroupKeysRole).toStringList();
+    if (!groupKeys.isEmpty()) {
+        item->setData(true, PopulatedRole);
+        item->removeRows(0, item->rowCount());   // drop the placeholder
+        const QIcon fileIcon = style()->standardIcon(QStyle::SP_FileIcon);
+        for (const QString &k : groupKeys) {
+            const int idx = m_libIndexByKey.value(k, -1);
+            const QString title = (idx >= 0 && idx < m_fullLibrary.size())
+                                       ? m_fullLibrary.at(idx).title : k;
+            auto *leaf = new QStandardItem(fileIcon, title);
+            leaf->setData(k, KeyRole);
+            item->appendRow(leaf);
+        }
+        return;
+    }
+
+    // Filesystem nodes are lazily populated; other virtual nodes carry no path.
+    if (item->data(PathRole).toString().isEmpty())
         return;
     item->setData(true, PopulatedRole);
     item->removeRows(0, item->rowCount());   // drop the placeholder
@@ -893,6 +980,15 @@ QStringList MainWindow::keysForIndex(const QModelIndex &index) const
 {
     if (!index.isValid())
         return {};
+    // Lazy Subsonic album group: its keys are stored, so it resolves without expanding.
+    const QStringList groupKeys = index.data(GroupKeysRole).toStringList();
+    if (!groupKeys.isEmpty()) {
+        QStringList out;
+        out.reserve(groupKeys.size());
+        for (const QString &k : groupKeys)
+            out += storedForm(QUrl(k));
+        return out;
+    }
     // Filesystem node (file or folder): resolve via its path — walks the folder.
     const QString path = index.data(PathRole).toString();
     if (!path.isEmpty())
@@ -918,7 +1014,7 @@ void MainWindow::appendRemoteNode()
     // track's album field (importer folds yt-dlp playlist_title into it).
     QList<const Track *> remotes;
     for (const Track &t : m_fullLibrary)
-        if (t.isRemote())
+        if (t.isRemote() && !t.isSubsonic())   // subsonic gets its own source node
             remotes.append(&t);
     if (remotes.isEmpty())
         return;
@@ -955,17 +1051,72 @@ void MainWindow::appendRemoteNode()
 
 void MainWindow::refreshRemoteNode()
 {
-    // Replace just the Remote root, leaving the filesystem folder nodes (and their
-    // expansion state) untouched.
-    for (int r = 0; r < m_treeModel->rowCount(); ++r) {
+    // Replace the virtual source roots (Remote + Subsonic), leaving the filesystem
+    // folder nodes (and their expansion state) untouched. Iterate backwards since we
+    // remove rows.
+    for (int r = m_treeModel->rowCount() - 1; r >= 0; --r) {
         QStandardItem *it = m_treeModel->item(r);
         if (it && it->data(IsGroupRole).toBool()
-            && it->data(PathRole).toString().isEmpty()) {
+            && it->data(PathRole).toString().isEmpty())
             m_treeModel->removeRow(r);
-            break;
-        }
     }
     appendRemoteNode();
+    appendSubsonicNodes();
+}
+
+void MainWindow::appendSubsonicNodes()
+{
+    // One "Subsonic" source root with a child per configured server, then
+    // artist → album → track. m_fullLibrary is already sorted (artist, album, track), so
+    // appending each group on first encounter yields sorted nodes. Album leaves are built
+    // lazily (GroupKeysRole), so a 45k-track server doesn't create 45k items up front.
+    QHash<QString, QList<const Track *>> byServer;
+    for (const Track &t : m_fullLibrary)
+        if (t.isSubsonic())
+            byServer[t.url.host()].append(&t);
+    if (byServer.isEmpty())
+        return;
+
+    const QIcon groupIcon = style()->standardIcon(QStyle::SP_DirIcon);
+    auto makeGroup = [&groupIcon](const QString &label) {
+        auto *g = new QStandardItem(groupIcon, label);
+        g->setData(true, IsGroupRole);
+        g->setData(true, PopulatedRole);   // server/artist/album subgroups built eagerly
+        return g;
+    };
+
+    auto *root = makeGroup(tr("Subsonic"));
+    QHash<QStandardItem *, QStringList> albumKeys;   // accumulate, then set once (avoid O(n²))
+
+    for (auto sit = byServer.constBegin(); sit != byServer.constEnd(); ++sit) {
+        const SubsonicServer sv = SubsonicClient::server(sit.key());
+        QString name = sv.name;
+        if (name.isEmpty())
+            name = sv.url.isEmpty() ? sit.key() : QUrl(sv.url).host();
+        auto *serverItem = makeGroup(name);
+        root->appendRow(serverItem);
+
+        QHash<QString, QStandardItem *> artistItems;   // artist -> node (this server)
+        QHash<QString, QStandardItem *> albumItems;    // artist\x1f album -> node
+        for (const Track *t : sit.value()) {
+            const QString artist = t->artist.isEmpty() ? tr("Unknown artist") : t->artist;
+            const QString album = t->album.isEmpty() ? tr("Unknown album") : t->album;
+            QStandardItem *&ai = artistItems[artist];
+            if (!ai) { ai = makeGroup(artist); serverItem->appendRow(ai); }
+            const QString akey = artist + '\x1f' + album;
+            QStandardItem *&ali = albumItems[akey];
+            if (!ali) {
+                ali = makeGroup(album);
+                ali->setData(false, PopulatedRole);          // leaves built on expand
+                ali->appendRow(new QStandardItem);           // placeholder -> expand arrow
+                ai->appendRow(ali);
+            }
+            albumKeys[ali] << t->key();
+        }
+    }
+    for (auto kit = albumKeys.constBegin(); kit != albumKeys.constEnd(); ++kit)
+        kit.key()->setData(kit.value(), GroupKeysRole);
+    m_treeModel->insertRow(0, root);
 }
 
 int MainWindow::playRowForKey(const QUrl &url) const
@@ -1036,6 +1187,8 @@ void MainWindow::openSettings(bool startOnLibrary)
     // Live output-device switch (reverted below on Cancel).
     connect(&dlg, &SettingsDialog::audioDeviceChanged, this,
             [this](const QByteArray &id) { m_controller->setAudioDevice(id); });
+    connect(&dlg, &SettingsDialog::subsonicSyncRequested, this,
+            &MainWindow::startSubsonicSync);
 
 #ifdef HAVE_DISCORD_RPC
     const bool curDiscordEnabled = s.value("discord/enabled", true).toBool();
@@ -1917,6 +2070,41 @@ void MainWindow::cancelActiveImport()
     box.exec();   // Esc/close == keep (non-destructive)
 
     emit cancelImports(box.clickedButton() == remove);
+}
+
+void MainWindow::startSubsonicSync(const QString &serverId)
+{
+    const SubsonicServer sv = SubsonicClient::server(serverId);
+    if (!sv.valid()) {
+        ToastArea::post(tr("Subsonic server is not configured."));
+        return;
+    }
+    if (m_subsonicSync) {   // supersede any running sync
+        m_subsonicSync->cancelSync();
+        m_subsonicSync->deleteLater();
+        m_subsonicSync = nullptr;
+    }
+    m_subsonicSync = new SubsonicClient(sv, this);
+    connect(m_subsonicSync, &SubsonicClient::syncStatus, this,
+            [this](const QString &msg) { m_status->post(StatusStack::Scan, msg); });
+    connect(m_subsonicSync, &SubsonicClient::songsReady, this,
+            [this](const QString &id, const QList<Track> &tracks, qint64 epoch) {
+                emit syncSubsonicBatch(id, tracks, epoch, /*finalPrune=*/false);
+            });
+    connect(m_subsonicSync, &SubsonicClient::syncFinished, this,
+            [this](const QString &id, qint64 epoch) {
+                emit syncSubsonicBatch(id, QList<Track>{}, epoch, /*finalPrune=*/true);
+                m_subsonicSync->deleteLater();
+                m_subsonicSync = nullptr;
+            });
+    connect(m_subsonicSync, &SubsonicClient::syncFailed, this,
+            [this](const QString &, const QString &err) {
+                ToastArea::post(tr("Subsonic sync failed — %1").arg(err));
+                m_status->post(StatusStack::Scan, QString());
+                m_subsonicSync->deleteLater();
+                m_subsonicSync = nullptr;
+            });
+    m_subsonicSync->startSync();
 }
 
 void MainWindow::onQueueChanged(const QList<Track> &queue)

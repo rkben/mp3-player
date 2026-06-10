@@ -50,6 +50,8 @@ qt_add_executable(mp3player
     src/RemoteResolver.h
     src/YtDlp.cpp
     src/YtDlp.h
+    src/SubsonicClient.cpp
+    src/SubsonicClient.h
     src/YtDlpManager.cpp
     src/YtDlpManager.h
     src/Toast.cpp
