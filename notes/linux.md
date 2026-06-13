@@ -6,7 +6,7 @@ Single portable file with Qt bundled dynamically. Built against the **official Q
 (from aqtinstall, under `~/Qt` — same Qt the macOS build uses), **not** the host's
 system Qt. The resulting binary needs a glibc **>= the build host's**: building on
 this rolling-Arch box gives an artifact for this machine + very recent distros;
-the **Woodpecker CI** path (below) builds it in a Debian 13 container (glibc 2.41)
+the **CI** path (below) builds it in a Debian 13 container (glibc 2.41)
 for a portable artifact.
 
 ### Why official Qt (the FFmpeg backend)
@@ -60,15 +60,15 @@ to the KF6 + Qt versions — impractical and fragile to ship. (This is a bundlin
 choice, *not* an AppImage permissions/sandbox limitation — AppImages aren't
 sandboxed; see linuxdeploy-plugin-qt issue #5 "Dealing with platform themes".)
 
-## CI (Woodpecker)
-`.woodpecker.yml` builds the AppImage in a **Debian 13 (trixie)** container — glibc
-2.41, current stable — for a portable artifact (runs on Debian 13+/Ubuntu 24.04+/
-recent distros). It `apt-get`s the toolchain + `libtag1-dev` (trixie's TagLib 2.0.2
-has the CMake config, so no from-source build) + the X11/xcb/wayland runtime libs
-linuxdeploy resolves, installs official Qt via aqtinstall into `/opt/Qt`, then runs
-`scripts/package-appimage.sh` with `QT_DIR` set and `APPIMAGE_EXTRACT_AND_RUN=1`
-(the CI container has no FUSE). The publish step is a commented placeholder — wire it
-to your forge's release plugin.
+## CI (forgejo-runner)
+CI runs under **forgejo-runner**. The portable build is produced in a **Debian 13
+(trixie)** container — glibc 2.41, current stable — for an artifact that runs on
+Debian 13+/Ubuntu 24.04+/recent distros. The job `apt-get`s the toolchain +
+`libtag1-dev` (trixie's TagLib 2.0.2 has the CMake config, so no from-source build)
++ the X11/xcb/wayland runtime libs linuxdeploy resolves, installs official Qt via
+aqtinstall into `/opt/Qt`, then runs `scripts/package-appimage.sh` with `QT_DIR`
+set and `APPIMAGE_EXTRACT_AND_RUN=1` (the CI container has no FUSE). Release publish
+(attach the AppImage to a Forgejo release on tag builds) is still TODO.
 
 ### Wayland (was the prior failure)
 linuxdeploy-plugin-qt only bundles the **xcb** platform plugin by default: the Wayland

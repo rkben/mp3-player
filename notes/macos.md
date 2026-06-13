@@ -159,6 +159,18 @@ bundled FFmpeg, streaming works).
 - **v2 — frictionless:** **Developer ID sign + notarize + staple** ($99/yr Apple
   Developer) so the download "just works" with no user step.
 
+## CI (forgejo-runner)
+
+`.forgejo/workflows/macos.yml` builds the **universal** dmg on a **self-hosted mac
+runner** (`runs-on: macos`) — macOS can't use containers, so the job runs on the
+host. It `brew install`s `ninja` + `utf8cpp`, installs official Qt 6.11.1 via
+aqtinstall into `~/Qt` (cached; not a marketplace action, so it doesn't depend on
+the instance mirroring one), builds the universal static TagLib
+(`scripts/build-taglib-universal.sh`, also cached), then runs
+`ARCHS="arm64;x86_64" scripts/package-macos.sh` and uploads `mp3player.dmg`. Ad-hoc
+signing needs no secrets; Developer ID **notarization is still TODO** (would add a
+signed/stapled, frictionless download — needs secrets on the runner).
+
 ## Smoke test checklist
 
 Cold scan, local playback, remote import + stream (yt-dlp), playlists, settings

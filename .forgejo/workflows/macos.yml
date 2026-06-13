@@ -1,0 +1,71 @@
+# Forgejo Actions: build the universal (arm64+x86_64) macOS .dmg on a self-hosted
+# mac runner. macOS can't run in containers, so this targets the host runner
+# directly (label: macos). Mirrors scripts/package-macos.sh + notes/macos.md.
+name: macOS dmg
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight build of the same ref.
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dmg:
+    runs-on: macos
+    env:
+      QT_VERSION: 6.11.1
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ninja for the build; utf8cpp headers for the static TagLib build (it reads
+      # them from /opt/homebrew/include). Xcode CLT/cmake are assumed on the runner.
+      - name: Toolchain
+        run: brew install ninja utf8cpp
+
+      # Cache official Qt + the from-source static TagLib across runs (per-job
+      # aqtinstall is otherwise ~minutes). Optional — drop if your instance lacks
+      # the cache action.
+      - name: Cache Qt
+        uses: actions/cache@v4
+        with:
+          path: ~/Qt
+          key: qt-${{ env.QT_VERSION }}-macos
+      - name: Cache static TagLib
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: taglib-${{ hashFiles('scripts/build-taglib-universal.sh') }}
+
+      # Official Qt (universal, bundles its own FFmpeg) via aqtinstall into ~/Qt —
+      # package-macos.sh auto-detects the newest ~/Qt/<ver>/macos. NOT a marketplace
+      # action (install-qt-action) so this doesn't depend on the instance mirroring it.
+      - name: Install official Qt
+        run: |
+          if [ ! -x "$HOME/Qt/$QT_VERSION/macos/bin/macdeployqt" ]; then
+            python3 -m venv /tmp/aqt
+            /tmp/aqt/bin/pip install --quiet --upgrade pip aqtinstall
+            /tmp/aqt/bin/aqt install-qt mac desktop "$QT_VERSION" clang_64 \
+              -m qtmultimedia qtimageformats -O "$HOME/Qt"
+          fi
+
+      # Universal static TagLib (arm64+x86_64) -> .deps/taglib-universal. Required
+      # before a universal package; the cache step above skips the rebuild on a hit.
+      - name: Build universal static TagLib
+        run: scripts/build-taglib-universal.sh
+
+      # configure -> build -> macdeployqt -> trim -> ad-hoc sign -> dmg.
+      # Ad-hoc signing needs no secrets; notarization (Developer ID) is out of scope.
+      - name: Package universal dmg
+        run: ARCHS="arm64;x86_64" scripts/package-macos.sh
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pocket_Player-macos-universal
+          path: build-mac-uni/mp3player.dmg
+          if-no-files-found: error

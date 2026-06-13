@@ -1,10 +1,9 @@
 # Pocket Player — common build / test / tooling tasks.
 #
-# Builds are pinned to the canonical source path: the repo is reachable from two
-# paths sharing an inode, and AUTOMOC breaks unless cmake is driven from the
-# Projects copy. So every target uses $(SRC) rather than the current directory.
+# $(realpath) resolves symlinks so $(SRC) is the same physical dir however you
+# cd in — AUTOMOC bakes absolute paths and breaks if builds disagree on it.
 
-SRC        := /home/rkb/Projects/p/mp3-player
+SRC        := $(realpath $(CURDIR))
 BUILD      := $(SRC)/build
 BUILD_TYPE ?= Release
 JOBS       ?= $(shell nproc)

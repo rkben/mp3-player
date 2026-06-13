@@ -34,8 +34,9 @@ I haven't read most of this, initially an experiment and turned out okay.
   - Horizontal collapsing is wonky
   - Better matching Qt6 to MacOS
   - Probably tweaks to match Windows *sigh*
-- Building on Woodpecker -> push to GH releases
-  - AppImage pipeline scaffolded (`.woodpecker.yml`); release-publish step still a placeholder
+- Building in CI (forgejo-runner) -> push to releases
+  - macOS universal dmg workflow (`.forgejo/workflows/macos.yml`); release-publish step still a placeholder
+  - AppImage build recipe documented (`notes/linux.md`); Linux workflow + release-publish still TODO
 - MacOS's implementation of SMB is garbage and slow
   - #wontfix but I'm mad
 - Edge cases for some interaction

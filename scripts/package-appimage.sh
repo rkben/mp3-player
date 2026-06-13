@@ -11,7 +11,7 @@
 # host's desktop FFmpeg instead hard-links a whole encoder tree (dav1d/rav1e/
 # SvtAv1/va/glib/…) that doesn't bundle reliably against mismatched host libs.
 # The AppImage needs a glibc >= the build host's — fine on this machine;
-# the Woodpecker/Debian-13 pipeline (.woodpecker.yml) builds it in a controlled,
+# the CI/Debian-13 pipeline (forgejo-runner) builds it in a controlled,
 # older-glibc base for a portable artifact. yt-dlp is NOT bundled; the app
 # downloads/manages it at runtime.
 set -euo pipefail

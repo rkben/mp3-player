@@ -52,8 +52,8 @@ The script deploys via `linuxdeploy --plugin qt`, forces the Wayland plugins,
 stubs/strips the non-SQLite SQL drivers, and bundles the xdg-portal theme (Fusion
 base; no KDE Breeze/KF6). `NO_STRIP=1` is forced because linuxdeploy's bundled
 `strip` chokes on modern `.relr.dyn` (and bundled Qt/system libs already ship
-stripped anyway). `.woodpecker.yml` builds it in a Debian 13 container for a portable
-artifact. Full detail in `notes/linux.md`.
+stripped anyway). CI (forgejo-runner) builds it in a Debian 13 container for a
+portable artifact. Full detail in `notes/linux.md`.
 
 ## Architecture
 
