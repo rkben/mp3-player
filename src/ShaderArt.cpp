@@ -1,84 +1,41 @@
 #include "ShaderArt.h"
 
-#include <QDateTime>
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QFile>
-#include <QFileInfo>
-#include <QFileSystemWatcher>
-#include <QLibraryInfo>
-#include <QProcess>
 #include <rhi/qrhi.h>
 
 namespace {
-QShader loadShader(const QString &path) {
+QByteArray readFile(const QString &path) {
   QFile f(path);
   if (f.open(QIODevice::ReadOnly))
-    return QShader::fromSerialized(f.readAll());
+    return f.readAll();
   qWarning("ShaderArt: failed to load %s", qPrintable(path));
   return {};
 }
+QShader loadShader(const QString &path) {
+  return QShader::fromSerialized(readFile(path));
+}
+// Always-available baked fallback (compiled in by qt_add_shaders).
+constexpr auto kDefaultFragQsb = ":/shaders/plasma.frag.qsb";
 constexpr float kVerts[6] = {-1.0f, -1.0f, 3.0f, -1.0f, -1.0f, 3.0f};
 } // namespace
 
 ShaderArt::ShaderArt(QWidget *parent)
     : QRhiWidget(parent), m_clock(std::make_unique<QElapsedTimer>()) {
   m_clock->start();
-
-#ifdef SHADER_DIR
-  m_watcher = new QFileSystemWatcher(this);
-  QString fragPath = QStringLiteral(SHADER_DIR) + "/plasma.frag";
-
-  if (QFile::exists(fragPath)) {
-    m_watcher->addPath(fragPath);
-    connect(m_watcher, &QFileSystemWatcher::fileChanged, this,
-            &ShaderArt::onShaderFileChanged);
-    qDebug() << "Live Shader Watcher active for:" << fragPath;
-  } else {
-    qWarning() << "Could not find physical shader to watch at:" << fragPath;
-  }
-#endif
 }
 
 ShaderArt::~ShaderArt() = default;
 
-void ShaderArt::onShaderFileChanged(const QString &path) {
-  qDebug() << "\n[Watcher] Shader modified. Recompiling:" << path;
-
-  QString qsbPath = QLibraryInfo::path(QLibraryInfo::BinariesPath) + "/qsb";
-#ifdef Q_OS_WIN
-  qsbPath += ".exe";
-#endif
-
-  QString outputPath = QStringLiteral(SHADER_DIR) + "/plasma.frag.qsb";
-
-  QStringList arguments;
-  arguments << "--qt6" << "-o" << outputPath << path;
-
-  qDebug() << "[Compiler] Executing:" << qsbPath << arguments.join(" ");
-
-  QProcess *process = new QProcess(this);
-  connect(process, &QProcess::finished, this,
-          [this, process, outputPath](int exitCode) {
-            if (exitCode == 0) {
-              qDebug() << "[Compiler] Success! New .qsb size is:"
-                       << QFileInfo(outputPath).size() << "bytes";
-
-#ifdef SHADER_DIR
-              m_watcher->addPath(QStringLiteral(SHADER_DIR) + "/plasma.frag");
-#endif
-
-              m_shaderNeedsReload = true;
-              update();
-            } else {
-              qWarning() << "[Compiler] GLSL Compile Error (Exit Code"
-                         << exitCode << "):";
-              qWarning().noquote() << process->readAllStandardError();
-            }
-            process->deleteLater();
-          });
-
-  process->start(qsbPath, arguments);
+void ShaderArt::setFragmentShader(const QByteArray &serializedShader) {
+  if (!QShader::fromSerialized(serializedShader).isValid()) {
+    qWarning() << "ShaderArt::setFragmentShader: ignoring invalid shader";
+    return; // keep the current shader
+  }
+  m_fragQsb = serializedShader;
+  m_shaderNeedsReload = true; // rebuild the pipeline on the next frame
+  update();
 }
 
 void ShaderArt::initialize(QRhiCommandBuffer *) {
@@ -113,29 +70,14 @@ void ShaderArt::initialize(QRhiCommandBuffer *) {
   }
 
   if (!m_pipeline) {
-    QShader fragShader;
-#ifdef SHADER_DIR
-    QString diskPath = QStringLiteral(SHADER_DIR) + "/plasma.frag.qsb";
-    if (QFile::exists(diskPath)) {
-      QFileInfo info(diskPath);
-      qDebug() << "[Loader] SUCCESS: Loading shader from DISK:" << diskPath;
-      qDebug() << "[Loader] File modified at:" << info.lastModified().toString()
-               << "Size:" << info.size() << "bytes";
-      fragShader = loadShader(diskPath);
-    } else {
-      qWarning() << "[Loader] WARNING: Disk shader NOT found at:" << diskPath
-                 << "\n         Falling back to static compiled resource!";
-      fragShader = loadShader(QStringLiteral(":/shaders/plasma.frag.qsb"));
-    }
-#else
-    qWarning()
-        << "[Loader] SHADER_DIR not defined. Loading from static resources.";
-    fragShader = loadShader(QStringLiteral(":/shaders/plasma.frag.qsb"));
-#endif
+    // First use (or no shader swapped in yet): fall back to the baked default.
+    if (m_fragQsb.isEmpty())
+      m_fragQsb = readFile(QString::fromLatin1(kDefaultFragQsb));
 
+    const QShader fragShader = QShader::fromSerialized(m_fragQsb);
     if (!fragShader.isValid()) {
       qWarning()
-          << "[Loader] Loaded shader is invalid. Postponing pipeline creation.";
+          << "[Loader] No valid fragment shader. Postponing pipeline creation.";
       return;
     }
 

@@ -204,13 +204,16 @@ endif()
 option(BUILD_SHADER_DEMO "Build the QRhiWidget shader demo" OFF)
 if(BUILD_SHADER_DEMO)
     find_package(Qt6 REQUIRED COMPONENTS ShaderTools GuiPrivate Multimedia)
-    qt_add_executable(shader_demo 
+    qt_add_executable(shader_demo
         demo/shader_demo.cpp
+        demo/ShaderReloader.cpp
+        demo/ShaderReloader.h
         src/ShaderArt.cpp
         src/ShaderArt.h
     )
-    
-    # ADD THIS LINE: This passes the source folder path to your C++ code
+
+    # SHADER_DIR points the demo-only ShaderReloader at the live-editable .frag
+    # sources (it watches demo/live.frag and recompiles via qsb on change).
     target_compile_definitions(shader_demo PRIVATE SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/demo")
 
     qt_add_shaders(shader_demo "shader_demo_shaders"

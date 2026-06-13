@@ -15,6 +15,10 @@
 compile_commands.json
 tools/
 testdata/
+# Compiled shaders — baked by qt_add_shaders at build time; the demo's live
+# reload writes to a temp dir, so none should be tracked under demo/.
+demo/*.frag.qsb
+demo/*.vert.qsb
 
 # Generated probes / fixtures (derived from a local music library)
 dates.tsv
