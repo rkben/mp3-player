@@ -59,6 +59,11 @@ public slots:
     // Empty the queue. If a track is playing it is kept (as the sole entry) and
     // keeps playing; when it ends the queue is exhausted and playback stops.
     void clearQueue();
+    // Collapse duplicates in the active queue, in place. Always drops exact-URI
+    // dups (keeps the first); when Prefer-HQ is on it additionally collapses same
+    // artist+title copies to the best one. The current track is preserved. Emits
+    // queueChanged if anything was removed. Returns the number of tracks removed.
+    int dedupeQueue();
     // Load a queue but stay stopped (still "nothing playing"), so a later play()
     // — e.g. a media key / MPRIS Play before anything was clicked — can start it.
     // No-op while something is already playing/loaded.

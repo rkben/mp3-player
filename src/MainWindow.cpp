@@ -1901,6 +1901,15 @@ void MainWindow::buildQueueMenu()
         setCurrentPlaylist(QString(), /*dirty=*/false);   // close any active playlist
     });
 
+    QAction *dedup = m_queueMenu->addAction(tr("Remove duplicates"));
+    dedup->setEnabled(m_controller->queueSize() > 1);
+    connect(dedup, &QAction::triggered, this, [this] {
+        const int removed = m_controller->dedupeQueue();
+        ToastArea::post(removed > 0
+            ? tr("Removed %n duplicate track(s).", nullptr, removed)
+            : tr("No duplicates found."));
+    });
+
     QAction *save = m_queueMenu->addAction(tr("Save"));
     save->setEnabled(hasQueue && m_queueDirty && !m_currentPlaylist.isEmpty());
     connect(save, &QAction::triggered, this, [this] {

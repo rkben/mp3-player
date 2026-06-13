@@ -327,6 +327,49 @@ void PlayerController::clearQueue()
     emit queueChanged(m_queue);
 }
 
+int PlayerController::dedupeQueue()
+{
+    if (m_queue.size() < 2)
+        return 0;
+    const int oldSize = m_queue.size();
+    int focus = m_index;   // keep the currently-playing row through the remaps
+
+    // Pass 1 — exact-URI dedup: keep the first occurrence per key. Covers remote
+    // and untagged tracks that the Prefer-HQ collapse below leaves untouched.
+    QList<Track> out;
+    out.reserve(m_queue.size());
+    QHash<QString, int> slotForKey;        // key -> position in `out`
+    QVector<int> inToOut(m_queue.size(), -1);
+    for (int i = 0; i < m_queue.size(); ++i) {
+        const QString key = m_queue.at(i).key();
+        const auto it = slotForKey.constFind(key);
+        if (it == slotForKey.constEnd()) {
+            slotForKey.insert(key, out.size());
+            inToOut[i] = out.size();
+            out.append(m_queue.at(i));
+        } else {
+            inToOut[i] = it.value();   // a dropped dup maps to the survivor's slot
+        }
+    }
+    if (focus >= 0 && focus < inToOut.size())
+        focus = inToOut[focus];
+
+    // Pass 2 — same-song quality collapse (no-op when Prefer-HQ is off).
+    out = applyPreferHq(out, m_preferHq, &focus);
+
+    if (out.size() == oldSize)
+        return 0;   // nothing removed — leave the queue (and bookkeeping) alone
+
+    m_queue = out;
+    m_index = focus;
+    m_autoNext = -1;
+    m_prefetchUrl = QUrl{};
+    m_prefetchStream = QUrl{};
+    emit queueChanged(m_queue);
+    decideAutoNext();
+    return oldSize - out.size();
+}
+
 void PlayerController::setReadyQueue(const QList<Track> &tracks)
 {
     // A silent fallback only: play() adopts it when the real queue is empty.
