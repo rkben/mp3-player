@@ -148,11 +148,20 @@ private:
     void seedReadyQueue();   // give the player a ready queue when nothing's playing
     void startAutoPlay();    // begin playback on launch, honouring the shuffle state
     void applyCompact(bool compact);   // narrow/mobile vs wide/desktop layout
+    // Fold player-resolved metadata into the view row + DB. Shared by play-time
+    // resolution and the MetadataProbe; updateNowPlaying refreshes the labels
+    // only when the resolved track is the one currently playing.
+    void applyResolvedMetadata(const QUrl &url, const QString &title,
+                               const QString &artist, const QString &album,
+                               int trackNo, qint64 durationMs,
+                               bool updateNowPlaying);
 
     PlaylistModel *m_model;
     PlayerController *m_controller;
     MusicLibrary *m_library = nullptr;
     QThread *m_libThread = nullptr;
+    class MetadataProbe *m_probe = nullptr;      // player-backed tag fallback
+    QThread *m_probeThread = nullptr;
     Importer *m_importer = nullptr;
     SubsonicClient *m_subsonicSync = nullptr;   // active background Subsonic sync (or null)
     QNetworkAccessManager *m_coverNet = nullptr;   // lazy Subsonic cover-art downloads

@@ -55,6 +55,8 @@ qt_add_executable(mp3player
     src/PlayerController.h
     src/MediaEngine.cpp
     src/MediaEngine.h
+    src/MetadataProbe.cpp
+    src/MetadataProbe.h
     src/MediaSession.cpp
     src/MediaSession.h
     src/RemoteResolver.cpp

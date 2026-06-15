@@ -54,7 +54,7 @@ int progressEvery()
 
 // A file that needs (re)parsing, plus the freshly parsed result.
 struct ScanItem { QString path; qint64 mtime; QString sourceLabel; };
-struct ParsedRow { Track track; qint64 mtime; };
+struct ParsedRow { Track track; qint64 mtime; bool tagOk; };
 
 // Upsert for a remote (streamed) row, shared by the three remote sources:
 // yt-dlp imports (importTracks/commitImportedTrack, mtime=0) and Subsonic sync
@@ -349,12 +349,14 @@ void MusicLibrary::upsert(QSqlQuery &q, const Track &t, qint64 mtime)
         qWarning() << "upsert failed:" << q.lastError().text();
 }
 
-Track MusicLibrary::parseTags(const QString &path, qint64 /*mtime*/)
+Track MusicLibrary::parseTags(const QString &path, qint64 /*mtime*/, bool *tagOk)
 {
     Track t;
     t.url = QUrl::fromLocalFile(path);
 
     TagLib::FileRef f(QFile::encodeName(path).constData(), /*readAudioProperties=*/true);
+    if (tagOk)
+        *tagOk = !f.isNull();
     if (!f.isNull()) {
         if (TagLib::Tag *tag = f.tag()) {
             t.title = QString::fromStdString(tag->title().to8Bit(true));
@@ -410,7 +412,10 @@ void MusicLibrary::enrichMetadata(const QString &path, const QString &title,
               "album    = COALESCE(NULLIF(?,''), album), "
               "track_no = CASE WHEN ? > 0 THEN ? ELSE track_no END, "
               "duration = CASE WHEN ? > 0 THEN ? ELSE duration END "
-              "WHERE path = ?");
+              // remote=0: only local rows are keyed by filesystem path. Remote
+              // (Subsonic/yt-dlp) rows carry NULL path and own their metadata
+              // from import, so player/probe-resolved tags must never touch them.
+              "WHERE path = ? AND remote = 0");
     q.addBindValue(title);
     q.addBindValue(artist);
     q.addBindValue(album);
@@ -987,7 +992,9 @@ void MusicLibrary::scan(const QStringList &folders)
 
         QFuture<ParsedRow> future = QtConcurrent::mapped(
             &m_pool, todo, [](const ScanItem &it) {
-                return ParsedRow{parseTags(it.path, it.mtime), it.mtime};
+                bool tagOk = false;
+                Track t = parseTags(it.path, it.mtime, &tagOk);
+                return ParsedRow{t, it.mtime, tagOk};
             });
 
         m_db.transaction();
@@ -996,6 +1003,9 @@ void MusicLibrary::scan(const QStringList &folders)
         int done = 0;
         QList<Track> batch;
         batch.reserve(kAppendBatch);
+        // Files TagLib couldn't open — re-read via the player's FFmpeg backend
+        // after the scan (the MetadataProbe), rather than waiting until play time.
+        QStringList needProbe;
 
         // Results arrive in input order; consume them as the pool produces them.
         for (auto it = future.begin(); it != future.end(); ++it) {
@@ -1005,6 +1015,8 @@ void MusicLibrary::scan(const QStringList &folders)
             }
             upsert(up, it->track, it->mtime);
             changed = true;
+            if (!it->tagOk)
+                needProbe.append(it->track.url.toLocalFile());
             if (cold) {
                 batch.append(it->track);
                 if (batch.size() >= kAppendBatch) {
@@ -1040,6 +1052,9 @@ void MusicLibrary::scan(const QStringList &folders)
         m_db.commit();
         if (cold && !batch.isEmpty())
             emit tracksAppended(batch);
+        // Hand TagLib's rejects to the player-backed probe (skipped on cancel).
+        if (!m_cancel.loadRelaxed() && !needProbe.isEmpty())
+            emit tracksNeedProbe(needProbe);
         // Final 100% emit happens inside the loop above (done == total); skipped
         // on cancel so we never report a bogus complete.
 

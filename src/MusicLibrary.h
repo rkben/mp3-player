@@ -101,6 +101,9 @@ signals:
     void scanProgress(int done, int total, const QString &sourceLabel,
                       const QString &fileName);
     void scanStatus(const QString &message);          // empty string == idle/finished
+    // Local files TagLib couldn't open (f.isNull()). Emitted once per scan so the
+    // MetadataProbe can re-read them via the player's FFmpeg backend.
+    void tracksNeedProbe(const QStringList &paths);
     void artResolved(const QString &path, const QString &artUrl);
     void searchResults(const QString &query, const QList<Track> &tracks);
 
@@ -128,7 +131,9 @@ private:
     QList<Track> loadAll(QHash<QString, qint64> *mtimesOut);
     QSqlQuery prepareUpsert();                              // hoisted out of the scan loop
     static void upsert(QSqlQuery &q, const Track &t, qint64 mtime);
-    static Track parseTags(const QString &path, qint64 mtime);
+    // tagOk (when given) reports whether TagLib actually opened the file; a false
+    // result feeds the path to the MetadataProbe fallback.
+    static Track parseTags(const QString &path, qint64 mtime, bool *tagOk = nullptr);
     QString extractArt(const QString &path, qint64 mtime);   // -> file:// URL or empty
     static QString buildMatchQuery(const QString &text, int scope);  // FTS5 MATCH expr
 

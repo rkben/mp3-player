@@ -2,6 +2,7 @@
 #include "PlaylistModel.h"
 #include "PlayerController.h"
 #include "SettingsDialog.h"
+#include "MetadataProbe.h"
 #include "MusicLibrary.h"
 #include "RemoteResolver.h"
 #include "CoverLabel.h"
@@ -184,22 +185,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &PlayerController::metadataResolved, this,
             [this](const QUrl &url, const QString &title, const QString &artist,
                    const QString &album, int trackNo, qint64 durationMs) {
-                // Update the matching view row (if present) and persist to the DB.
-                const int row = playRowForKey(url);
-                if (row >= 0)
-                    m_model->updateTrack(row, title, artist, album, durationMs, trackNo);
-                if (m_controller->currentTrack().url == url) {
-                    const Track &cur = m_controller->currentTrack();
-                    setWindowTitle(cur.displayText());
-                    showTrackInfo(cur);   // refresh the left info panel
-                }
-                // Only local rows are keyed by filesystem path; a remote URL's
-                // toLocalFile() is "", so enrichMetadata would UPDATE ... WHERE
-                // path='' and touch zero rows. Skip it — import already sets remote
-                // metadata, and player-resolved metadata for streams isn't persisted.
-                if (url.isLocalFile())
-                    emit enrichTrack(url.toLocalFile(), title, artist, album,
-                                     trackNo, durationMs);
+                applyResolvedMetadata(url, title, artist, album, trackNo, durationMs,
+                                      /*updateNowPlaying=*/true);
             });
 
     // Keep the widgets and persisted settings in sync with the controller, no
@@ -271,6 +258,33 @@ MainWindow::~MainWindow()
         m_libThread->quit();
         m_libThread->wait();
     }
+    if (m_probeThread) {
+        m_probeThread->quit();
+        m_probeThread->wait();
+    }
+}
+
+void MainWindow::applyResolvedMetadata(const QUrl &url, const QString &title,
+                                       const QString &artist, const QString &album,
+                                       int trackNo, qint64 durationMs,
+                                       bool updateNowPlaying)
+{
+    // Update the matching view row (if present) and persist to the DB.
+    const int row = playRowForKey(url);
+    if (row >= 0)
+        m_model->updateTrack(row, title, artist, album, durationMs, trackNo);
+    if (updateNowPlaying && m_controller->currentTrack().url == url) {
+        const Track &cur = m_controller->currentTrack();
+        setWindowTitle(cur.displayText());
+        showTrackInfo(cur);   // refresh the left info panel
+    }
+    // Only local rows are keyed by filesystem path; a remote URL's
+    // toLocalFile() is "", so enrichMetadata would UPDATE ... WHERE
+    // path='' and touch zero rows. Skip it — import already sets remote
+    // metadata, and player-resolved metadata for streams isn't persisted.
+    if (url.isLocalFile())
+        emit enrichTrack(url.toLocalFile(), title, artist, album,
+                         trackNo, durationMs);
 }
 
 void MainWindow::startLibraryThread()
@@ -303,6 +317,24 @@ void MainWindow::startLibraryThread()
     });
 
     m_libThread->start();
+
+    // Player-backed metadata fallback for TagLib's rejects. Own thread (like the
+    // engine) so slow/network source opens never reach the GUI thread. The scan
+    // hands it a batch of paths; results route through the same enrich path as
+    // play-time resolution (no now-playing refresh — these aren't playing).
+    m_probeThread = new QThread(this);
+    m_probe = new MetadataProbe;          // no parent: moved to the worker thread
+    m_probe->moveToThread(m_probeThread);
+    connect(m_probeThread, &QThread::finished, m_probe, &QObject::deleteLater);
+    connect(m_probeThread, &QThread::started, m_probe, &MetadataProbe::init);
+    connect(m_library, &MusicLibrary::tracksNeedProbe, m_probe, &MetadataProbe::enqueue);
+    connect(m_probe, &MetadataProbe::resolved, this,
+            [this](const QString &path, const QString &title, const QString &artist,
+                   const QString &album, int trackNo, qint64 durationMs) {
+                applyResolvedMetadata(QUrl::fromLocalFile(path), title, artist, album,
+                                      trackNo, durationMs, /*updateNowPlaying=*/false);
+            });
+    m_probeThread->start();
 
     // yt-dlp importer (GUI thread; async QProcess). Inserts remote tracks via the
     // library worker, then creates/appends a playlist and notifies.
