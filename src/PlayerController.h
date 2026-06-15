@@ -108,6 +108,8 @@ signals:
     void repeatModeChanged(RepeatMode mode);
     // Smoothed [0..1] loudness for the visualizer (relayed from the engine).
     void amplitudeChanged(float amplitude);
+    // 64 smoothed [0..1] frequency bands for the visualizer (relayed from the engine).
+    void spectrumChanged(const QList<float> &bands);
     // Player-resolved tags for the track at `url` (e.g. formats TagLib can't read).
     void metadataResolved(const QUrl &url, const QString &title, const QString &artist,
                           const QString &album, int trackNo, qint64 durationMs);

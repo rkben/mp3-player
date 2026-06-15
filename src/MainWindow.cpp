@@ -670,9 +670,12 @@ QWidget *MainWindow::buildTrackInfoPanel()
     m_visualizer->setMinimumHeight(80);
     m_visualizer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_coverStack->addWidget(m_visualizer);   // page 1: visualizer
-    if (m_controller)
+    if (m_controller) {
         connect(m_controller, &PlayerController::amplitudeChanged,
                 m_visualizer, &ShaderArt::setAmplitude);
+        connect(m_controller, &PlayerController::spectrumChanged,
+                m_visualizer, &ShaderArt::setSpectrum);
+    }
 
     // Pop-out affordance: a small button overlaid in the visualizer's top-right
     // corner (eventFilter keeps it pinned there as the widget resizes).
@@ -772,9 +775,12 @@ void MainWindow::toggleVisualizerPopOut()
     m_popupVisualizer = new ShaderArt;
     if (!m_currentShader.isEmpty())
         m_popupVisualizer->setShaderByName(m_currentShader);
-    if (m_controller)
+    if (m_controller) {
         connect(m_controller, &PlayerController::amplitudeChanged,
                 m_popupVisualizer, &ShaderArt::setAmplitude);
+        connect(m_controller, &PlayerController::spectrumChanged,
+                m_popupVisualizer, &ShaderArt::setSpectrum);
+    }
 
     m_visWindow = new VisualizerWindow(m_popupVisualizer, [this] {
         m_popupVisualizer = nullptr;   // destroyed with the window

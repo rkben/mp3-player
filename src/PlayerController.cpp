@@ -92,6 +92,7 @@ PlayerController::PlayerController(QObject *parent)
     qRegisterMetaType<QMediaPlayer::PlaybackState>();
     qRegisterMetaType<QMediaPlayer::Error>();
     qRegisterMetaType<QMediaMetaData>();
+    qRegisterMetaType<QList<float>>();   // spectrum bands across the worker->GUI thread
 
     m_engine->moveToThread(m_engineThread);
     connect(m_engineThread, &QThread::started, m_engine, &MediaEngine::init);
@@ -132,6 +133,8 @@ PlayerController::PlayerController(QObject *parent)
             this, &PlayerController::onPlaybackStateChanged);
     connect(m_engine, &MediaEngine::amplitudeChanged,
             this, &PlayerController::amplitudeChanged);   // relay to the GUI/visualizer
+    connect(m_engine, &MediaEngine::spectrumChanged,
+            this, &PlayerController::spectrumChanged);    // relay to the GUI/visualizer
 
     // Remote stream resolution. The result is only loaded if it's still the
     // current track (the user may have skipped while yt-dlp was running).

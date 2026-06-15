@@ -72,6 +72,14 @@ void ShaderArt::initialize(QRhiCommandBuffer *) {
     m_ubuf->create();
   }
 
+  if (!m_specBuf) {
+    // binding=1: 64 spectrum bands as std140 vec4[16] = 256 bytes. Additive to
+    // the binding=0 uniforms; shaders that don't declare it simply ignore it.
+    m_specBuf.reset(
+        r->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 256));
+    m_specBuf->create();
+  }
+
   if (!m_vbuf) {
     m_vbuf.reset(r->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer,
                               sizeof(kVerts)));
@@ -84,6 +92,8 @@ void ShaderArt::initialize(QRhiCommandBuffer *) {
     m_srb->setBindings({
         QRhiShaderResourceBinding::uniformBuffer(
             0, QRhiShaderResourceBinding::FragmentStage, m_ubuf.get()),
+        QRhiShaderResourceBinding::uniformBuffer(
+            1, QRhiShaderResourceBinding::FragmentStage, m_specBuf.get()),
     });
     m_srb->create();
   }
@@ -148,8 +158,30 @@ void ShaderArt::render(QRhiCommandBuffer *cb) {
   // (resolution.x/resolution.y) or do pixel-space work, instead of assuming square.
   const QSize sz = renderTarget()->pixelSize();
   const float t = m_clock->elapsed() / 1000.0f;
+
+  // Ease the displayed loudness toward its target each frame (snap up, ease
+  // down) — same display-paced smoothing as the spectrum below.
+  if (m_amplitudeTarget > m_amplitude)
+    m_amplitude = m_amplitudeTarget;
+  else
+    m_amplitude += (m_amplitudeTarget - m_amplitude) * 0.22f;
+
   float ubufData[4] = {t, m_amplitude, float(sz.width()), float(sz.height())};
   batch->updateDynamicBuffer(m_ubuf.get(), 0, 16, ubufData);
+
+  // Ease the displayed spectrum toward the latest target once per painted frame:
+  // snap up on transients (punchy) but ease back down, decoupling the bars'
+  // motion from the bursty audio-callback cadence. Spectrum at binding=1: 64
+  // contiguous floats map 1:1 onto std140 vec4[16] (each vec4 holds 4
+  // tightly-packed floats), so a flat upload is correct.
+  for (size_t i = 0; i < m_spectrum.size(); ++i) {
+    const float target = m_spectrumTarget[i];
+    if (target > m_spectrum[i])
+      m_spectrum[i] = target;                              // snap up
+    else
+      m_spectrum[i] += (target - m_spectrum[i]) * 0.22f;   // ease down
+  }
+  batch->updateDynamicBuffer(m_specBuf.get(), 0, 256, m_spectrum.data());
 
   cb->beginPass(renderTarget(), QColor(Qt::black), {1.0f, 0}, batch);
   cb->setGraphicsPipeline(m_pipeline.get());

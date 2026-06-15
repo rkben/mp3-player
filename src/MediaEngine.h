@@ -3,7 +3,12 @@
 #include <QObject>
 #include <QMediaPlayer>
 #include <QMediaMetaData>
+#include <QList>
 #include <QUrl>
+
+#include <vector>
+
+#include "Spectrum.h"
 
 class QAudioOutput;
 class QAudioBufferOutput;
@@ -49,6 +54,8 @@ signals:
     void metaDataChanged(const QMediaMetaData &metaData);
     // Smoothed [0..1] loudness for the visualizer (only while capture is active).
     void amplitudeChanged(float amplitude);
+    // 64 smoothed [0..1] log-spaced frequency bands (only while capture is active).
+    void spectrumChanged(const QList<float> &bands);
 
 private:
     QMediaPlayer *m_player = nullptr;
@@ -58,7 +65,8 @@ private:
     float m_pendingVolume = 0.8f;   // perceptual level; applied once the output exists
     QByteArray m_pendingDeviceId;   // output device id; applied once the output exists
     bool m_pendingVisualizer = false;   // visualizer capture wanted before init()
-    float m_smoothAmplitude = 0.0f;     // envelope-follower state
+    SpectrumAnalyzer m_analyzer;        // FFT band analyzer for the spectrum
+    std::vector<float> m_mono;          // per-callback mono downmix scratch buffer
 
     void applyOutputDevice();   // (re)point the sink at the configured/default device
     void onAudioBuffer(const QAudioBuffer &buffer);   // RMS + envelope -> amplitudeChanged

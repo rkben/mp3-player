@@ -100,8 +100,9 @@ void MediaEngine::setVisualizerActive(bool on)
         m_player->setAudioBufferOutput(nullptr);
         delete m_bufferOutput;
         m_bufferOutput = nullptr;
-        m_smoothAmplitude = 0.0f;
         emit amplitudeChanged(0.0f);   // let the visualizer settle to rest
+        m_analyzer.reset();
+        emit spectrumChanged(QList<float>(SpectrumAnalyzer::kNumBands, 0.0f));
     }
 }
 
@@ -110,46 +111,49 @@ void MediaEngine::onAudioBuffer(const QAudioBuffer &buffer)
     const int n = buffer.sampleCount();
     if (n == 0)
         return;
+    const int channels = std::max(1, buffer.format().channelCount());
+    const int frames = n / channels;
+    if (frames == 0)
+        return;
 
-    // RMS of the buffer, normalised to [0..1] regardless of sample format.
-    double sum = 0.0;
+    // Downmix to a mono float scratch buffer once (normalised to [-1..1]), then
+    // reuse it for both the RMS amplitude and the FFT spectrum — one walk of the
+    // buffer feeds both. The scratch vector is a member so it isn't reallocated
+    // on every callback.
+    m_mono.resize(frames);
+    auto fill = [&](const auto *d, double scale) {
+        for (int f = 0; f < frames; ++f) {
+            double acc = 0.0;
+            for (int ch = 0; ch < channels; ++ch)
+                acc += double(d[f * channels + ch]) * scale;
+            m_mono[f] = float(acc / channels);
+        }
+    };
     switch (buffer.format().sampleFormat()) {
-    case QAudioFormat::Float: {
-        const float *d = buffer.constData<float>();
-        for (int i = 0; i < n; ++i)
-            sum += double(d[i]) * d[i];
-        break;
-    }
-    case QAudioFormat::Int16: {
-        const qint16 *d = buffer.constData<qint16>();
-        for (int i = 0; i < n; ++i) {
-            const double v = d[i] / 32768.0;
-            sum += v * v;
-        }
-        break;
-    }
-    case QAudioFormat::Int32: {
-        const qint32 *d = buffer.constData<qint32>();
-        for (int i = 0; i < n; ++i) {
-            const double v = d[i] / 2147483648.0;
-            sum += v * v;
-        }
-        break;
-    }
+    case QAudioFormat::Float: fill(buffer.constData<float>(), 1.0); break;
+    case QAudioFormat::Int16: fill(buffer.constData<qint16>(), 1.0 / 32768.0); break;
+    case QAudioFormat::Int32: fill(buffer.constData<qint32>(), 1.0 / 2147483648.0); break;
     default:
         return;   // UInt8/unknown — skip rather than misread
     }
-    const float rms = float(std::sqrt(sum / n));
 
-    // Envelope follower: snap up on transients, ease back down — gives the
-    // visualizer a punchy-but-smooth response (tuned in the demo).
-    const float target = std::min(1.0f, rms * 2.2f);
-    if (target > m_smoothAmplitude)
-        m_smoothAmplitude = target;
-    else
-        m_smoothAmplitude = m_smoothAmplitude * 0.872f + target * 0.09f;
+    // RMS of the mono frames, normalised to [0..1].
+    double sum = 0.0;
+    for (float v : m_mono)
+        sum += double(v) * v;
+    const float rms = float(std::sqrt(sum / frames));
 
-    emit amplitudeChanged(m_smoothAmplitude);
+    // Feed the mono frames to the analyzer and emit on its fixed, codec-agnostic
+    // cadence (see SpectrumAnalyzer::kHop). Gate the loudness on the same tick so
+    // amplitude and spectrum update together at the same rate regardless of the
+    // decoder's block size — otherwise small-block codecs (MP3) would update far
+    // more often, and look jumpier, than large-block ones (FLAC). ShaderArt does
+    // the snap-up/ease-down smoothing per painted frame for both.
+    if (m_analyzer.push(m_mono.data(), frames, buffer.format().sampleRate())) {
+        emit amplitudeChanged(std::min(1.0f, rms * 2.2f));
+        const auto &b = m_analyzer.bands();
+        emit spectrumChanged(QList<float>(b.begin(), b.end()));
+    }
 }
 
 void MediaEngine::load(const QUrl &url, bool autoplay)
