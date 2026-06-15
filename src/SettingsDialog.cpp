@@ -74,14 +74,22 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
     m_themeCombo->addItem(tr("Dark"), int(Theme::Mode::Dark));
     m_themeCombo->addItem(tr("Custom stylesheet…"), int(Theme::Mode::Custom));
     m_themeCombo->setCurrentIndex(m_themeCombo->findData(int(themeMode)));
+    m_themeCombo->setToolTip(tr("\"System\" follows your desktop's light/dark setting; "
+                                "\"Dark\" forces the built-in dark theme; \"Custom\" "
+                                "loads your own Qt stylesheet."));
 
     m_themeFileEdit = new QLineEdit(themeFile);
     m_themeFileEdit->setPlaceholderText(tr("Path to a .qss stylesheet"));
+    m_themeFileEdit->setToolTip(tr("A Qt Style Sheet (.qss/.css) applied on top of the "
+                                   "base theme. Used only when the theme is \"Custom\"."));
     m_themeBrowse = new QPushButton(tr("Browse…"));
     m_themeBrowse->setMinimumHeight(34);
+    m_themeBrowse->setToolTip(tr("Choose a .qss/.css stylesheet file."));
 
     m_restoreQueue = new QCheckBox(tr("Restore last queue"));
     m_restoreQueue->setChecked(restoreQueue);
+    m_restoreQueue->setToolTip(tr("Reload the play queue from your last session on "
+                                  "startup, including the playing track and position."));
 
     m_autoPlay = new QCheckBox(tr("Auto-play"));
     m_autoPlay->setChecked(autoPlay);
@@ -342,6 +350,10 @@ QWidget *SettingsDialog::buildGeneralTab()
     m_preferHqCombo->addItem(tr("Yes (also higher bitrate)"), 2);
     m_preferHqCombo->setCurrentIndex(
         QSettings().value(QStringLiteral("playback/preferHq"), 0).toInt());
+    m_preferHqCombo->setToolTip(tr("When duplicates of the same song are queued, keep "
+                                   "only the best copy. \"Naive\" prefers lossless over "
+                                   "lossy; \"Yes\" also prefers the higher bitrate. "
+                                   "Applies to local tracks."));
     audioForm->addRow(tr("Prefer higher quality:"), m_preferHqCombo);
     auto *hqHint = new QLabel(tr("When the same song exists in several files, play the "
                                  "better one — lossless over lossy, then higher bitrate."));
@@ -354,19 +366,25 @@ QWidget *SettingsDialog::buildGeneralTab()
     audioForm->addRow(hqHint);
 
     // Ignore-by-title (one regex per line). Self-contained via QSettings; matched
-    // case-insensitively against the track title when a set is enqueued.
+    // case-insensitively against a local track's title when a set is enqueued.
+    // Local-only by design — remote tracks (Subsonic/yt-dlp) are never filtered.
     m_ignoreTitles = new QPlainTextEdit;
     m_ignoreTitles->setPlainText(
         QSettings().value(QStringLiteral("playback/ignoreTitles"))
             .toStringList().join(QLatin1Char('\n')));
     m_ignoreTitles->setPlaceholderText(
-        tr("One pattern per line, e.g.\n^intro$\n\\[skit\\]\n(?i)hidden track"));
+        tr("One pattern per line, e.g.\n^intro$\n\\[skit\\]\nhidden track"));
     m_ignoreTitles->setMaximumHeight(96);
+    m_ignoreTitles->setToolTip(tr("One regular expression per line. A local track "
+                                  "whose title matches any of them is skipped when "
+                                  "building the play queue."));
     audioForm->addRow(tr("Ignore titles:"), m_ignoreTitles);
-    auto *ignoreHint = new QLabel(tr("Tracks whose title matches one of these regular "
-                                     "expressions are kept out of the play queue. "
-                                     "Matched case-insensitively; invalid patterns are "
-                                     "ignored."));
+    auto *ignoreHint = new QLabel(tr("Keep local tracks out of the play queue when their "
+                                     "title matches one of these regular expressions "
+                                     "(one per line). Applies to your local library "
+                                     "only — streamed sources such as Subsonic and "
+                                     "yt-dlp are never filtered. Matched "
+                                     "case-insensitively; invalid patterns are ignored."));
     ignoreHint->setWordWrap(true);
     {
         QFont f = ignoreHint->font();
@@ -389,6 +407,9 @@ QWidget *SettingsDialog::buildGeneralTab()
     m_visualizer = new QCheckBox(tr("Show audio visualizer instead of album art"));
     m_visualizer->setChecked(
         QSettings().value(QStringLiteral("ui/visualizer"), false).toBool());
+    m_visualizer->setToolTip(tr("Replace the album-art panel with a live shader that "
+                                "reacts to the audio. Off keeps the cover image and "
+                                "leaves the audio analysis disabled."));
     visForm->addRow(m_visualizer);
 
     m_visualizerShader = new QComboBox;
@@ -399,6 +420,8 @@ QWidget *SettingsDialog::buildGeneralTab()
     if (const int idx = m_visualizerShader->findData(curShader); idx >= 0)
         m_visualizerShader->setCurrentIndex(idx);
     m_visualizerShader->setEnabled(m_visualizer->isChecked());
+    m_visualizerShader->setToolTip(tr("Which visualizer shader to display. "
+                                      "Only used while the visualizer is shown."));
     visForm->addRow(tr("Shader:"), m_visualizerShader);
 
     auto emitVisualizer = [this] {
@@ -424,6 +447,9 @@ QWidget *SettingsDialog::buildGeneralTab()
     m_ytUseManaged = new QCheckBox(tr("Use managed yt-dlp"));
     m_ytUseManaged->setChecked(
         QSettings().value(QStringLiteral("ytdlp/useManaged"), false).toBool());
+    m_ytUseManaged->setToolTip(tr("Let the app download and update its own private copy "
+                                  "of yt-dlp, instead of the one on your system PATH. "
+                                  "The managed copy takes precedence when enabled."));
     importForm->addRow(m_ytUseManaged);
     auto *ytManagedHint = new QLabel(tr("Download and keep yt-dlp updated "
         "automatically instead of using the copy on your system PATH."));
@@ -440,6 +466,8 @@ QWidget *SettingsDialog::buildGeneralTab()
 
     auto *ytBtns = new QHBoxLayout;
     m_ytDownload = new QPushButton;   // label set by refreshYtStatus (Download/Update)
+    m_ytDownload->setToolTip(tr("Fetch the latest yt-dlp release from GitHub into the "
+                                "app's private copy."));
     m_ytRemove = new QPushButton(tr("Remove"));
     m_ytRemove->setToolTip(tr("Delete the managed binary and use the system PATH copy."));
     ytBtns->addWidget(m_ytDownload);
@@ -539,6 +567,9 @@ QWidget *SettingsDialog::buildGeneralTab()
     m_discordEnabled = new QCheckBox(tr("Show now-playing as a Discord status"));
     m_discordEnabled->setChecked(
         QSettings().value(QStringLiteral("discord/enabled"), false).toBool());
+    m_discordEnabled->setToolTip(tr("Display the current track as your Discord Rich "
+                                    "Presence while the app is running and Discord is "
+                                    "open."));
     connect(m_discordEnabled, &QCheckBox::toggled, this,
             [this](bool on) { emit discordEnabledChanged(on); });
     discordForm->addRow(m_discordEnabled);
@@ -608,9 +639,13 @@ QWidget *SettingsDialog::buildLibraryTab(bool autoSync)
     auto *folderBtns = new QHBoxLayout;
     auto *addBtn = new QPushButton(tr("Add folder…"));
     addBtn->setMinimumHeight(34);
+    addBtn->setToolTip(tr("Add a folder to scan for music. It and its subfolders are "
+                          "indexed into your library."));
     connect(addBtn, &QPushButton::clicked, this, &SettingsDialog::addFolder);
     m_removeBtn = new QPushButton(tr("Remove"));
     m_removeBtn->setMinimumHeight(34);
+    m_removeBtn->setToolTip(tr("Stop scanning the selected folder. Its tracks are "
+                               "dropped from the library on the next sync."));
     connect(m_removeBtn, &QPushButton::clicked, this, &SettingsDialog::removeFolder);
     folderBtns->addWidget(addBtn);
     folderBtns->addWidget(m_removeBtn);
@@ -836,7 +871,11 @@ QWidget *SettingsDialog::buildSubsonicGroup()
 
     auto *listBtns = new QHBoxLayout;
     auto *addBtn = new QPushButton(tr("Add"));
+    addBtn->setToolTip(tr("Add a new Subsonic/OpenSubsonic server entry to configure "
+                          "below."));
     m_ssRemoveBtn = new QPushButton(tr("Remove"));
+    m_ssRemoveBtn->setToolTip(tr("Delete the selected server and remove its synced "
+                                 "tracks from your library."));
     listBtns->addWidget(addBtn);
     listBtns->addWidget(m_ssRemoveBtn);
     listBtns->addStretch(1);
@@ -855,6 +894,8 @@ QWidget *SettingsDialog::buildSubsonicGroup()
 
     auto *testRow = new QHBoxLayout;
     m_ssTestBtn = new QPushButton(tr("Test"));
+    m_ssTestBtn->setToolTip(tr("Check that the URL and credentials can reach the "
+                               "server, without syncing anything."));
     auto *syncBtn = new QPushButton(tr("Sync now"));
     syncBtn->setToolTip(tr("Save and sync this server's library into yours (runs in the "
                            "background; you can close Settings)."));

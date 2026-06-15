@@ -85,9 +85,10 @@ public slots:
     // Prefer-HQ dedup mode applied when a set is enqueued: 0=off, 1=naive (format),
     // 2=naive + bitrate tiebreak. Cached; affects future enqueues only.
     void setPreferHq(int mode) { m_preferHq = mode; }
-    // Regex patterns (one per entry) whose match against a track *title* keeps that
-    // track out of the queue when a set is enqueued. Compiled case-insensitively;
-    // invalid patterns are skipped. Cached; affects future enqueues only.
+    // Regex patterns (one per entry) whose match against a *local* track's title
+    // keeps that track out of the queue when a set is enqueued. Remote tracks
+    // (Subsonic/yt-dlp) are never filtered. Compiled case-insensitively; invalid
+    // patterns are skipped. Cached; affects future enqueues only.
     void setIgnorePatterns(const QStringList &patterns);
     // Update the current track's cover art (resolved asynchronously elsewhere).
     void setCurrentArt(const QUrl &url, const QString &artUrl);

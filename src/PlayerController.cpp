@@ -79,10 +79,12 @@ QList<Track> applyPreferHq(const QList<Track> &in, int mode, int *focus = nullpt
     return out;
 }
 
-// Drop tracks whose title matches any ignore pattern, preserving order. The track
-// at *focus is exempt — it was explicitly chosen (double-clicked / already playing),
-// so a filter rule never yanks it out from under the user; *focus is remapped to
-// its new position (or -1 when there was no focus).
+// Drop local tracks whose title matches any ignore pattern, preserving order.
+// Remote tracks (Subsonic/yt-dlp) pass through untouched — they own their metadata
+// from import and the filter is scoped to the local-file library. The track at
+// *focus is also exempt — it was explicitly chosen (double-clicked / already
+// playing), so a filter rule never yanks it out from under the user; *focus is
+// remapped to its new position (or -1 when there was no focus).
 QList<Track> applyIgnore(const QList<Track> &in, const QVector<QRegularExpression> &pats,
                          int *focus = nullptr)
 {
@@ -93,9 +95,10 @@ QList<Track> applyIgnore(const QList<Track> &in, const QVector<QRegularExpressio
     out.reserve(in.size());
     int newFocus = -1;
     for (int i = 0; i < in.size(); ++i) {
-        if (i == keep) {
-            newFocus = out.size();
-            out.append(in.at(i));
+        if (i == keep || !in.at(i).url.isLocalFile()) {
+            if (i == keep)
+                newFocus = out.size();
+            out.append(in.at(i));   // protected row, or a remote track (never filtered)
             continue;
         }
         const QString title = in.at(i).title.trimmed();
