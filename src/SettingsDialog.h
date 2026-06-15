@@ -55,6 +55,11 @@ signals:
     void themeChanged(Theme::Mode mode, const QString &file);
     // Emitted on output-device selection so the host can switch audio immediately.
     void audioDeviceChanged(const QByteArray &id);
+#ifdef HAVE_VISUALIZER
+    // Emitted on visualizer toggle / shader change, for live preview (reverted on
+    // Cancel). Persisted to QSettings on OK.
+    void visualizerChanged(bool on, const QString &shader);
+#endif
     // Emitted when "Sync now" is clicked for a saved Subsonic server (the host owns the
     // background sync so it continues after the dialog closes).
     void subsonicSyncRequested(const QString &serverId);
@@ -98,6 +103,10 @@ private:
     QString m_savedYtOverride;   // the explicit ytdlp/path override at open ("" = none)
     QComboBox *m_audioCombo;
     QComboBox *m_preferHqCombo = nullptr;   // self-contained: persists to QSettings
+#ifdef HAVE_VISUALIZER
+    QCheckBox *m_visualizer = nullptr;         // self-contained: ui/visualizer
+    QComboBox *m_visualizerShader = nullptr;   // self-contained: ui/visualizerShader
+#endif
     QPlainTextEdit *m_logView = nullptr;
     YtDlpManager *m_ytdlp = nullptr;
     QCheckBox *m_ytUseManaged = nullptr;

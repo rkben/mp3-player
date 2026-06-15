@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QRhiWidget>
+#include <QStringList>
 #include <memory>
 
 class QElapsedTimer;
@@ -32,6 +33,13 @@ public:
   // the serialized contents of a baked .qsb file. Safe to call from the GUI
   // thread at any time; empty/invalid bytes are ignored (last shader stays).
   void setFragmentShader(const QByteArray &serializedShader);
+
+  // Load a baked preset by name: :/shaders/<name>.frag.qsb.
+  void setShaderByName(const QString &name);
+
+  // Preset names available to pick, derived from the baked :/shaders/*.frag.qsb
+  // resources at runtime (sorted). Used to populate the settings dropdown.
+  static QStringList availableShaders();
 
 protected:
   void initialize(QRhiCommandBuffer *cb) override;

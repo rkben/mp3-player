@@ -6,6 +6,8 @@
 #include <QUrl>
 
 class QAudioOutput;
+class QAudioBufferOutput;
+class QAudioBuffer;
 class QMediaDevices;
 
 // Owns the QMediaPlayer + QAudioOutput and nothing else. Designed to live on a
@@ -33,6 +35,10 @@ public slots:
     // Route output to the QAudioDevice with this id (QAudioDevice::id()); an empty
     // id, or one that no longer exists, means the current system default.
     void setAudioDevice(const QByteArray &id);
+    // Attach/detach audio-buffer capture for the visualizer. Off by default: the
+    // capture tees decoded audio to us, so it only runs while the visualizer is
+    // visible (keeps the idle/album-art path zero-overhead).
+    void setVisualizerActive(bool on);
 
 signals:
     void positionChanged(qint64 ms);
@@ -41,13 +47,19 @@ signals:
     void playbackStateChanged(QMediaPlayer::PlaybackState state);
     void errorOccurred(QMediaPlayer::Error error, const QString &errorString);
     void metaDataChanged(const QMediaMetaData &metaData);
+    // Smoothed [0..1] loudness for the visualizer (only while capture is active).
+    void amplitudeChanged(float amplitude);
 
 private:
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_audio = nullptr;
+    QAudioBufferOutput *m_bufferOutput = nullptr;   // visualizer audio tap (when active)
     QMediaDevices *m_devices = nullptr;   // watches for OS device add/remove/default change
     float m_pendingVolume = 0.8f;   // perceptual level; applied once the output exists
     QByteArray m_pendingDeviceId;   // output device id; applied once the output exists
+    bool m_pendingVisualizer = false;   // visualizer capture wanted before init()
+    float m_smoothAmplitude = 0.0f;     // envelope-follower state
 
     void applyOutputDevice();   // (re)point the sink at the configured/default device
+    void onAudioBuffer(const QAudioBuffer &buffer);   // RMS + envelope -> amplitudeChanged
 };

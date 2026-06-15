@@ -5,6 +5,10 @@
 #include "MusicLibrary.h"
 #include "RemoteResolver.h"
 #include "CoverLabel.h"
+#ifdef HAVE_VISUALIZER
+#include "ShaderArt.h"
+#include "VisualizerWindow.h"
+#endif
 #include "StatusStack.h"
 #include "Theme.h"
 #include "AudioFormats.h"
@@ -35,6 +39,7 @@
 #include <QTreeView>
 #include <QTabWidget>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QHeaderView>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
@@ -647,6 +652,40 @@ QWidget *MainWindow::buildTrackInfoPanel()
     m_coverArt->setMinimumHeight(80);
     m_coverArt->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
+#ifdef HAVE_VISUALIZER
+    // Album art and the shader visualizer share the same slot; a setting picks
+    // which is shown. The visualizer is created **eagerly** (not lazily) so the
+    // top-level window adopts the RHI/OpenGL surface now, while it's still being
+    // built — adding the first QRhiWidget to an already-shown window otherwise
+    // destroys and recreates the native window mid-session (the surface type flips
+    // RasterSurface->OpenGLSurface; see QOpenGLWidget docs, Qt 6.4+), which resets
+    // the window and drops the visualizer's first frame. It stays hidden behind the
+    // album art until enabled; a hidden QRhiWidget issues no draws, so it's cheap.
+    m_coverStack = new QStackedWidget;
+    m_coverStack->setMinimumHeight(80);
+    m_coverStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_coverStack->addWidget(m_coverArt);   // page 0: album art
+
+    m_visualizer = new ShaderArt;
+    m_visualizer->setMinimumHeight(80);
+    m_visualizer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_coverStack->addWidget(m_visualizer);   // page 1: visualizer
+    if (m_controller)
+        connect(m_controller, &PlayerController::amplitudeChanged,
+                m_visualizer, &ShaderArt::setAmplitude);
+
+    // Pop-out affordance: a small button overlaid in the visualizer's top-right
+    // corner (eventFilter keeps it pinned there as the widget resizes).
+    m_visPopOut = new QToolButton(m_visualizer);
+    m_visPopOut->setIcon(style()->standardIcon(QStyle::SP_TitleBarMaxButton));
+    m_visPopOut->setToolTip(tr("Open in a window (double-click or F11 for fullscreen)"));
+    m_visPopOut->setAutoRaise(true);
+    m_visPopOut->setCursor(Qt::PointingHandCursor);
+    connect(m_visPopOut, &QToolButton::clicked, this,
+            &MainWindow::toggleVisualizerPopOut);
+    m_visualizer->installEventFilter(this);
+#endif
+
     m_infoTitle = new QLabel;
     m_infoTitle->setObjectName("infoTitle");
     m_infoTitle->setAlignment(Qt::AlignCenter);
@@ -662,12 +701,98 @@ QWidget *MainWindow::buildTrackInfoPanel()
     m_infoAlbum->setAlignment(Qt::AlignCenter);
     m_infoAlbum->setWordWrap(true);
 
+#ifdef HAVE_VISUALIZER
+    v->addWidget(m_coverStack, /*stretch=*/1);
+#else
     v->addWidget(m_coverArt, /*stretch=*/1);
+#endif
     v->addWidget(m_infoTitle);
     v->addWidget(m_infoArtist);
     v->addWidget(m_infoAlbum);
+
+#ifdef HAVE_VISUALIZER
+    applyVisualizerSettings();   // honour the saved on/off + shader choice
+#endif
     return panel;
 }
+
+#ifdef HAVE_VISUALIZER
+void MainWindow::applyVisualizerSettings()
+{
+    QSettings s;
+    applyVisualizer(s.value(QStringLiteral("ui/visualizer"), false).toBool(),
+                    s.value(QStringLiteral("ui/visualizerShader")).toString());
+}
+
+void MainWindow::applyVisualizer(bool on, const QString &shader)
+{
+    m_visualizerOn = on;
+    if (!shader.isEmpty()) {
+        m_currentShader = shader;
+        m_visualizer->setShaderByName(shader);
+        if (m_popupVisualizer)
+            m_popupVisualizer->setShaderByName(shader);
+    }
+    m_coverStack->setCurrentWidget(on ? static_cast<QWidget *>(m_visualizer)
+                                      : static_cast<QWidget *>(m_coverArt));
+    updateVisualizerCapture();
+}
+
+void MainWindow::updateVisualizerCapture()
+{
+    // Tee decoded audio to us only while something is actually showing it — the
+    // in-panel visualizer or the pop-out window.
+    if (m_controller)
+        m_controller->setVisualizerActive(m_visualizerOn || m_visWindow != nullptr);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    // Keep the pop-out button pinned to the visualizer's top-right corner.
+    if (watched == m_visualizer && event->type() == QEvent::Resize && m_visPopOut) {
+        const int margin = 6;
+        const QSize bs = m_visPopOut->sizeHint();
+        m_visPopOut->resize(bs);
+        m_visPopOut->move(m_visualizer->width() - bs.width() - margin, margin);
+        m_visPopOut->raise();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void MainWindow::toggleVisualizerPopOut()
+{
+    if (m_visWindow) {            // already open — close it (callback clears state)
+        m_visWindow->close();
+        return;
+    }
+    // A separate, *independent* visualizer rather than reparenting the in-panel one:
+    // moving a QRhiWidget between windows recreates its QRhi (and would flip the main
+    // window's surface back), so a second instance keeps both windows stable. The
+    // window owns it (parented into the layout); both mirror the same shader + audio.
+    m_popupVisualizer = new ShaderArt;
+    if (!m_currentShader.isEmpty())
+        m_popupVisualizer->setShaderByName(m_currentShader);
+    if (m_controller)
+        connect(m_controller, &PlayerController::amplitudeChanged,
+                m_popupVisualizer, &ShaderArt::setAmplitude);
+
+    m_visWindow = new VisualizerWindow(m_popupVisualizer, [this] {
+        m_popupVisualizer = nullptr;   // destroyed with the window
+        m_visWindow->deleteLater();
+        m_visWindow = nullptr;
+        // Re-show the in-panel visualizer now that the window is gone (only if it
+        // was enabled to begin with).
+        m_coverStack->setCurrentWidget(m_visualizerOn ? static_cast<QWidget *>(m_visualizer)
+                                                       : static_cast<QWidget *>(m_coverArt));
+        updateVisualizerCapture();
+    }, this);
+    m_visWindow->show();
+    // Disable the in-panel mirror while the pop-out is open — flip the panel back to
+    // album art so the hidden QRhiWidget stops drawing (no point rendering twice).
+    m_coverStack->setCurrentWidget(m_coverArt);
+    updateVisualizerCapture();
+}
+#endif // HAVE_VISUALIZER
 
 void MainWindow::showTrackInfo(const Track &t)
 {
@@ -1172,6 +1297,10 @@ void MainWindow::openSettings(bool startOnLibrary)
     const Theme::Mode curTheme =
         Theme::modeFromString(s.value("ui/theme", "system").toString());
     const QString curThemeFile = s.value("ui/themeFile").toString();
+#ifdef HAVE_VISUALIZER
+    const bool curVisualizer = s.value("ui/visualizer", false).toBool();
+    const QString curVisualizerShader = s.value("ui/visualizerShader").toString();
+#endif
 
     SettingsDialog dlg(m_folders, curAutoSync, curRestoreQueue, curAutoPlay,
                        curYtDlp, curAudioDev, curTheme, curThemeFile, m_ytdlp, this);
@@ -1192,6 +1321,12 @@ void MainWindow::openSettings(bool startOnLibrary)
     // Live output-device switch (reverted below on Cancel).
     connect(&dlg, &SettingsDialog::audioDeviceChanged, this,
             [this](const QByteArray &id) { m_controller->setAudioDevice(id); });
+
+#ifdef HAVE_VISUALIZER
+    // Live visualizer preview (reverted below on Cancel).
+    connect(&dlg, &SettingsDialog::visualizerChanged, this,
+            [this](bool on, const QString &shader) { applyVisualizer(on, shader); });
+#endif
     connect(&dlg, &SettingsDialog::subsonicSyncRequested, this,
             &MainWindow::startSubsonicSync);
 
@@ -1204,6 +1339,9 @@ void MainWindow::openSettings(bool startOnLibrary)
     if (dlg.exec() != QDialog::Accepted) {
         Theme::apply(curTheme, curThemeFile);          // revert any preview
         m_controller->setAudioDevice(curAudioDev);     // revert live device switch
+#ifdef HAVE_VISUALIZER
+        applyVisualizer(curVisualizer, curVisualizerShader);   // revert visualizer preview
+#endif
 #ifdef HAVE_DISCORD_RPC
         if (m_discord) m_discord->setEnabled(curDiscordEnabled);
 #endif
@@ -1228,6 +1366,9 @@ void MainWindow::openSettings(bool startOnLibrary)
     s.setValue("ui/theme", Theme::modeToString(dlg.themeMode()));
     s.setValue("ui/themeFile", dlg.themeFile());
     Theme::apply(dlg.themeMode(), dlg.themeFile());
+#ifdef HAVE_VISUALIZER
+    applyVisualizerSettings();   // settings dialog already persisted ui/visualizer*
+#endif
 
     const QList<LibraryFolder> chosen = dlg.folders();
     if (libraryFolderPaths(chosen) != libraryFolderPaths(m_folders)

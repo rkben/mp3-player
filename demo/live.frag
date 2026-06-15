@@ -8,8 +8,7 @@ layout(std140, binding = 0) uniform buf {
                       //       below to speed up / slow down everything globally.
     float amplitude;  // KNOB: audio loudness 0..1, fed from the analyzer. Drives
                       //       blob size, blend softness, and the blue glow.
-    float pad1;
-    float pad2;
+    vec2 resolution;  // viewport pixel size (x=width, y=height)
 };
 
 float opSmoothUnion( float d1, float d2, float k )

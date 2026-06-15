@@ -24,7 +24,9 @@ class QComboBox;
 class QTimer;
 class QListWidget;
 class QMenu;
+class QStackedWidget;
 class CoverLabel;
+class ShaderArt;
 class StatusStack;
 class SubsonicClient;
 class QNetworkAccessManager;
@@ -46,6 +48,9 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void changeEvent(QEvent *event) override;   // re-tint icons on theme change
+#ifdef HAVE_VISUALIZER
+    bool eventFilter(QObject *watched, QEvent *event) override;   // reposition the pop-out overlay
+#endif
 
 signals:
     void requestScan(const QStringList &folders);
@@ -92,6 +97,12 @@ private:
     QWidget *buildTransportBar();
     QWidget *buildQueuePanel();       // right: "Queue" label + search + queue table
     QWidget *buildTrackInfoPanel();   // bottom-left: album art + track metadata
+#ifdef HAVE_VISUALIZER
+    void applyVisualizer(bool on, const QString &shader);   // switch art/visualizer + pick shader
+    void applyVisualizerSettings();   // read the saved on/off + shader, then applyVisualizer()
+    void toggleVisualizerPopOut();    // open/close a mirror visualizer window
+    void updateVisualizerCapture();   // enable audio capture if the panel or pop-out needs it
+#endif
     QList<Track> tracksForKeys(const QStringList &keys) const;    // resolve via library
     QStringList audioPathsForPath(const QString &path) const;    // file or folder -> paths
     void playNow(const QList<Track> &tracks);   // replace queue, drop any active playlist
@@ -160,6 +171,15 @@ private:
     QMenu *m_queueMenu = nullptr;
     QListWidget *m_playlistList = nullptr;   // Playlists tab
     CoverLabel *m_coverArt;
+#ifdef HAVE_VISUALIZER
+    QStackedWidget *m_coverStack = nullptr;  // album art <-> audio visualizer
+    ShaderArt *m_visualizer = nullptr;       // in-panel QRhiWidget (created eagerly)
+    ShaderArt *m_popupVisualizer = nullptr;  // independent mirror in the pop-out window
+    QToolButton *m_visPopOut = nullptr;      // overlay button: pop out
+    QWidget *m_visWindow = nullptr;          // detached visualizer window (when open)
+    QString m_currentShader;                 // applied to both in-panel + pop-out
+    bool m_visualizerOn = false;             // visualizer shown in the panel
+#endif
     QLabel *m_infoTitle;
     QLabel *m_infoArtist;
     QLabel *m_infoAlbum;

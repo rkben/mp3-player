@@ -1,8 +1,13 @@
 #include "MediaEngine.h"
 
+#include <QAudioBuffer>
+#include <QAudioBufferOutput>
 #include <QAudioOutput>
 #include <QAudioDevice>
 #include <QMediaDevices>
+
+#include <algorithm>
+#include <cmath>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
 #  include <QtAudio>      // QtAudio::convertVolume (the namespace was renamed in 6.7)
 #else
@@ -72,6 +77,79 @@ void MediaEngine::init()
     connect(m_player, &QMediaPlayer::metaDataChanged, this, [this] {
         emit metaDataChanged(m_player->metaData());
     });
+
+    if (m_pendingVisualizer)
+        setVisualizerActive(true);   // requested before the player existed
+}
+
+void MediaEngine::setVisualizerActive(bool on)
+{
+    if (!m_player) {            // not initialised yet — apply in init()
+        m_pendingVisualizer = on;
+        return;
+    }
+    if (on == (m_bufferOutput != nullptr))
+        return;                // already in the requested state
+
+    if (on) {
+        m_bufferOutput = new QAudioBufferOutput(this);
+        connect(m_bufferOutput, &QAudioBufferOutput::audioBufferReceived, this,
+                &MediaEngine::onAudioBuffer);
+        m_player->setAudioBufferOutput(m_bufferOutput);
+    } else {
+        m_player->setAudioBufferOutput(nullptr);
+        delete m_bufferOutput;
+        m_bufferOutput = nullptr;
+        m_smoothAmplitude = 0.0f;
+        emit amplitudeChanged(0.0f);   // let the visualizer settle to rest
+    }
+}
+
+void MediaEngine::onAudioBuffer(const QAudioBuffer &buffer)
+{
+    const int n = buffer.sampleCount();
+    if (n == 0)
+        return;
+
+    // RMS of the buffer, normalised to [0..1] regardless of sample format.
+    double sum = 0.0;
+    switch (buffer.format().sampleFormat()) {
+    case QAudioFormat::Float: {
+        const float *d = buffer.constData<float>();
+        for (int i = 0; i < n; ++i)
+            sum += double(d[i]) * d[i];
+        break;
+    }
+    case QAudioFormat::Int16: {
+        const qint16 *d = buffer.constData<qint16>();
+        for (int i = 0; i < n; ++i) {
+            const double v = d[i] / 32768.0;
+            sum += v * v;
+        }
+        break;
+    }
+    case QAudioFormat::Int32: {
+        const qint32 *d = buffer.constData<qint32>();
+        for (int i = 0; i < n; ++i) {
+            const double v = d[i] / 2147483648.0;
+            sum += v * v;
+        }
+        break;
+    }
+    default:
+        return;   // UInt8/unknown — skip rather than misread
+    }
+    const float rms = float(std::sqrt(sum / n));
+
+    // Envelope follower: snap up on transients, ease back down — gives the
+    // visualizer a punchy-but-smooth response (tuned in the demo).
+    const float target = std::min(1.0f, rms * 2.2f);
+    if (target > m_smoothAmplitude)
+        m_smoothAmplitude = target;
+    else
+        m_smoothAmplitude = m_smoothAmplitude * 0.872f + target * 0.09f;
+
+    emit amplitudeChanged(m_smoothAmplitude);
 }
 
 void MediaEngine::load(const QUrl &url, bool autoplay)

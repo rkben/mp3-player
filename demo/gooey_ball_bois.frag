@@ -6,8 +6,7 @@ layout(location = 0) out vec4 fragColor;
 layout(std140, binding = 0) uniform buf {
     float time;
     float amplitude;
-    float pad1;
-    float pad2;
+    vec2 resolution;  // viewport pixel size (x=width, y=height)
 };
 
 float opSmoothUnion( float d1, float d2, float k )

@@ -85,6 +85,9 @@ public slots:
     void setPreferHq(int mode) { m_preferHq = mode; }
     // Update the current track's cover art (resolved asynchronously elsewhere).
     void setCurrentArt(const QUrl &url, const QString &artUrl);
+    // Enable/disable the audio-buffer capture that feeds the visualizer. Off
+    // unless the visualizer is shown, so the album-art path stays zero-overhead.
+    void setVisualizerActive(bool on) { emit engineSetVisualizerActive(on); }
 
 signals:
     void currentTrackChanged(const Track &track);   // empty Track == nothing playing
@@ -103,6 +106,8 @@ signals:
     void volumeChanged(float linear);
     void shuffleChanged(bool on);
     void repeatModeChanged(RepeatMode mode);
+    // Smoothed [0..1] loudness for the visualizer (relayed from the engine).
+    void amplitudeChanged(float amplitude);
     // Player-resolved tags for the track at `url` (e.g. formats TagLib can't read).
     void metadataResolved(const QUrl &url, const QString &title, const QString &artist,
                           const QString &album, int trackNo, qint64 durationMs);
@@ -115,6 +120,7 @@ signals:
     void engineSetPosition(qint64 ms);
     void engineSetVolume(float linear);
     void engineSetAudioDevice(const QByteArray &id);
+    void engineSetVisualizerActive(bool on);
 
 private slots:
     void onMediaStatusChanged(QMediaPlayer::MediaStatus status);

@@ -1,6 +1,7 @@
 #include "ShaderArt.h"
 
 #include <QDebug>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <rhi/qrhi.h>
@@ -36,6 +37,24 @@ void ShaderArt::setFragmentShader(const QByteArray &serializedShader) {
   m_fragQsb = serializedShader;
   m_shaderNeedsReload = true; // rebuild the pipeline on the next frame
   update();
+}
+
+void ShaderArt::setShaderByName(const QString &name) {
+  setFragmentShader(
+      readFile(QStringLiteral(":/shaders/") + name + QStringLiteral(".frag.qsb")));
+}
+
+QStringList ShaderArt::availableShaders() {
+  // Derived from the baked resources so the list never drifts from CMake.
+  static const QString kSuffix = QStringLiteral(".frag.qsb");
+  QStringList names;
+  const QStringList qsb = QDir(QStringLiteral(":/shaders"))
+                              .entryList({QLatin1Char('*') + kSuffix},
+                                         QDir::Files, QDir::Name);
+  names.reserve(qsb.size());
+  for (const QString &f : qsb)
+    names << f.chopped(kSuffix.size());
+  return names;
 }
 
 void ShaderArt::initialize(QRhiCommandBuffer *) {
@@ -124,13 +143,16 @@ void ShaderArt::render(QRhiCommandBuffer *cb) {
     m_vbufUploaded = true;
   }
 
+  // uniform layout (std140): { float time; float amplitude; vec2 resolution; }.
+  // resolution is the viewport pixel size so shaders can correct aspect ratio
+  // (resolution.x/resolution.y) or do pixel-space work, instead of assuming square.
+  const QSize sz = renderTarget()->pixelSize();
   const float t = m_clock->elapsed() / 1000.0f;
-  float ubufData[4] = {t, m_amplitude, 0.0f, 0.0f};
+  float ubufData[4] = {t, m_amplitude, float(sz.width()), float(sz.height())};
   batch->updateDynamicBuffer(m_ubuf.get(), 0, 16, ubufData);
 
   cb->beginPass(renderTarget(), QColor(Qt::black), {1.0f, 0}, batch);
   cb->setGraphicsPipeline(m_pipeline.get());
-  const QSize sz = renderTarget()->pixelSize();
   cb->setViewport({0, 0, float(sz.width()), float(sz.height())});
   cb->setShaderResources(m_srb.get());
   const QRhiCommandBuffer::VertexInput vbuf(m_vbuf.get(), 0);

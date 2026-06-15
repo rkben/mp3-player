@@ -1,5 +1,8 @@
 #include "SettingsDialog.h"
 #include "Logger.h"
+#ifdef HAVE_VISUALIZER
+#include "ShaderArt.h"   // ShaderArt::availableShaders() for the visualizer dropdown
+#endif
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -158,6 +161,11 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         s.setValue(QStringLiteral("ytdlp/useManaged"), m_ytUseManaged->isChecked());
         s.setValue(QStringLiteral("playback/preferHq"),
                    m_preferHqCombo->currentData().toInt());
+#ifdef HAVE_VISUALIZER
+        s.setValue(QStringLiteral("ui/visualizer"), m_visualizer->isChecked());
+        s.setValue(QStringLiteral("ui/visualizerShader"),
+                   m_visualizerShader->currentData().toString());
+#endif
     });
     // Persist the Subsonic server list on OK.
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
@@ -337,6 +345,45 @@ QWidget *SettingsDialog::buildGeneralTab()
     }
     audioForm->addRow(hqHint);
     layout->addWidget(audioBox);
+
+#ifdef HAVE_VISUALIZER
+    // ---- Visualizer ----
+    // Self-contained via QSettings (like Prefer-HQ): the checkbox swaps album art
+    // for a QRhiWidget shader; the combo picks which baked shader (names enumerated
+    // from the baked resources). Applied live by the host, reverted on Cancel, saved
+    // on OK.
+    auto *visBox = new QGroupBox(tr("Visualizer"));
+    auto *visForm = new QFormLayout(visBox);
+    visForm->setSpacing(8);
+
+    m_visualizer = new QCheckBox(tr("Show audio visualizer instead of album art"));
+    m_visualizer->setChecked(
+        QSettings().value(QStringLiteral("ui/visualizer"), false).toBool());
+    visForm->addRow(m_visualizer);
+
+    m_visualizerShader = new QComboBox;
+    for (const QString &name : ShaderArt::availableShaders())
+        m_visualizerShader->addItem(name, name);
+    const QString curShader =
+        QSettings().value(QStringLiteral("ui/visualizerShader")).toString();
+    if (const int idx = m_visualizerShader->findData(curShader); idx >= 0)
+        m_visualizerShader->setCurrentIndex(idx);
+    m_visualizerShader->setEnabled(m_visualizer->isChecked());
+    visForm->addRow(tr("Shader:"), m_visualizerShader);
+
+    auto emitVisualizer = [this] {
+        emit visualizerChanged(m_visualizer->isChecked(),
+                               m_visualizerShader->currentData().toString());
+    };
+    connect(m_visualizer, &QCheckBox::toggled, this,
+            [this, emitVisualizer](bool on) {
+                m_visualizerShader->setEnabled(on);
+                emitVisualizer();
+            });
+    connect(m_visualizerShader, &QComboBox::currentIndexChanged, this,
+            [emitVisualizer] { emitVisualizer(); });
+    layout->addWidget(visBox);
+#endif // HAVE_VISUALIZER
 
     // ---- Import ----
     auto *importBox = new QGroupBox(tr("Import"));

@@ -105,6 +105,7 @@ PlayerController::PlayerController(QObject *parent)
     connect(this, &PlayerController::engineSetPosition, m_engine, &MediaEngine::setPosition);
     connect(this, &PlayerController::engineSetVolume, m_engine, &MediaEngine::setVolume);
     connect(this, &PlayerController::engineSetAudioDevice, m_engine, &MediaEngine::setAudioDevice);
+    connect(this, &PlayerController::engineSetVisualizerActive, m_engine, &MediaEngine::setVisualizerActive);
 
     // Engine -> controller (queued: marshalled back to the GUI thread). Position
     // and duration are cached for the synchronous getters and re-emitted.
@@ -129,6 +130,8 @@ PlayerController::PlayerController(QObject *parent)
             this, &PlayerController::onErrorOccurred);
     connect(m_engine, &MediaEngine::playbackStateChanged,
             this, &PlayerController::onPlaybackStateChanged);
+    connect(m_engine, &MediaEngine::amplitudeChanged,
+            this, &PlayerController::amplitudeChanged);   // relay to the GUI/visualizer
 
     // Remote stream resolution. The result is only loaded if it's still the
     // current track (the user may have skipped while yt-dlp was running).

@@ -19,9 +19,20 @@ else()
     option(ENABLE_MPRIS "Enable MPRIS D-Bus media control" OFF)
 endif()
 
+# Audio visualizer: a QRhiWidget shader shown instead of the album art. ON by
+# default. OFF drops the QRhi/ShaderTools/GuiPrivate dependency entirely — the app
+# just shows album art and bakes no shaders.
+option(ENABLE_VISUALIZER "Build the QRhiWidget audio visualizer" ON)
+
 # Qt Widgets + Multimedia only. No WebEngine, no Qt Quick/QML — keeps the
 # dependency surface and runtime CPU/GPU usage low.
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Multimedia Sql Concurrent Network)
+# GuiPrivate + ShaderTools back the QRhiWidget visualizer only: ShaderArt.cpp uses
+# the semi-private RHI API (rhi/qrhi.h) and qt_add_shaders bakes the .qsb shaders.
+# QShader is kept out of ShaderArt.h, so only that .cpp sees the private headers.
+if(ENABLE_VISUALIZER)
+    find_package(Qt6 REQUIRED COMPONENTS GuiPrivate ShaderTools)
+endif()
 # zlib: TagLib uses it (compressed ID3 frames). A dynamic TagLib has it baked in,
 # but a *static* TagLib (e.g. our universal macOS build) exports ZLIB::ZLIB in its
 # link interface, so the target must exist before find_package(taglib). Harmless
@@ -98,6 +109,28 @@ target_link_libraries(mp3player PRIVATE
     Qt6::Network
     TagLib::tag
 )
+
+# ---- Audio visualizer (QRhiWidget) ----
+if(ENABLE_VISUALIZER)
+    target_sources(mp3player PRIVATE
+        src/ShaderArt.cpp src/ShaderArt.h src/VisualizerWindow.h)
+    target_link_libraries(mp3player PRIVATE Qt6::GuiPrivate)  # rhi/qrhi.h
+    target_compile_definitions(mp3player PRIVATE HAVE_VISUALIZER)
+
+    # Bake the shaders into the app (:/shaders/<name>.frag.qsb). ShaderArt
+    # enumerates these at runtime for the settings dropdown. All demo/*.frag
+    # presets ship except the live-editable scratch and plasma.original.frag.
+    file(GLOB VIS_SHADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/demo/*.frag")
+    list(FILTER VIS_SHADERS EXCLUDE REGEX "/(live|plasma\\.original)\\.frag$")
+    qt_add_shaders(mp3player "mp3player_shaders"
+        PREFIX "/shaders"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/demo"
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/demo/fullscreen.vert" ${VIS_SHADERS}
+    )
+    message(STATUS "Audio visualizer: ON")
+else()
+    message(STATUS "Audio visualizer: OFF")
+endif()
 
 if(ENABLE_MPRIS)
     target_sources(mp3player PRIVATE src/MprisController.cpp src/MprisController.h)
