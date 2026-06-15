@@ -78,6 +78,41 @@ QList<Track> applyPreferHq(const QList<Track> &in, int mode, int *focus = nullpt
         *focus = inToOut[*focus];
     return out;
 }
+
+// Drop tracks whose title matches any ignore pattern, preserving order. The track
+// at *focus is exempt — it was explicitly chosen (double-clicked / already playing),
+// so a filter rule never yanks it out from under the user; *focus is remapped to
+// its new position (or -1 when there was no focus).
+QList<Track> applyIgnore(const QList<Track> &in, const QVector<QRegularExpression> &pats,
+                         int *focus = nullptr)
+{
+    if (pats.isEmpty() || in.isEmpty())
+        return in;
+    const int keep = focus ? *focus : -1;
+    QList<Track> out;
+    out.reserve(in.size());
+    int newFocus = -1;
+    for (int i = 0; i < in.size(); ++i) {
+        if (i == keep) {
+            newFocus = out.size();
+            out.append(in.at(i));
+            continue;
+        }
+        const QString title = in.at(i).title.trimmed();
+        bool ignored = false;
+        for (const QRegularExpression &re : pats) {
+            if (re.match(title).hasMatch()) {
+                ignored = true;
+                break;
+            }
+        }
+        if (!ignored)
+            out.append(in.at(i));
+    }
+    if (focus)
+        *focus = newFocus;
+    return out;
+}
 }
 
 PlayerController::PlayerController(QObject *parent)
@@ -274,9 +309,10 @@ void PlayerController::maybePrefetch()
 
 void PlayerController::playQueue(const QList<Track> &tracks, int start)
 {
-    // Prefer-HQ collapses same-song duplicates; remap the start index to the survivor.
+    // Drop ignored titles + collapse same-song duplicates; remap the start index to
+    // the survivor (the clicked track is protected from the ignore filter).
     int focus = start;
-    m_queue = applyPreferHq(tracks, m_preferHq, &focus);
+    m_queue = filterIncoming(tracks, &focus);
     start = focus;
     m_history.clear();
     m_historyPos = -1;
@@ -300,7 +336,7 @@ void PlayerController::enqueue(const QList<Track> &tracks)
 {
     if (tracks.isEmpty())
         return;
-    m_queue.append(applyPreferHq(tracks, m_preferHq));   // dedup the appended batch
+    m_queue.append(filterIncoming(tracks));   // drop ignored + dedup the batch
     emit queueChanged(m_queue);
     decideAutoNext();   // a track may now follow what was the last one
 }
@@ -360,8 +396,9 @@ int PlayerController::dedupeQueue()
     if (focus >= 0 && focus < inToOut.size())
         focus = inToOut[focus];
 
-    // Pass 2 — same-song quality collapse (no-op when Prefer-HQ is off).
-    out = applyPreferHq(out, m_preferHq, &focus);
+    // Pass 2 — drop ignored titles + same-song quality collapse (the latter a
+    // no-op when Prefer-HQ is off). The currently-playing row is protected.
+    out = filterIncoming(out, &focus);
 
     if (out.size() == oldSize)
         return 0;   // nothing removed — leave the queue (and bookkeeping) alone
@@ -374,6 +411,28 @@ int PlayerController::dedupeQueue()
     emit queueChanged(m_queue);
     decideAutoNext();
     return oldSize - out.size();
+}
+
+void PlayerController::setIgnorePatterns(const QStringList &patterns)
+{
+    m_ignorePatterns.clear();
+    m_ignorePatterns.reserve(patterns.size());
+    for (const QString &p : patterns) {
+        const QString trimmed = p.trimmed();
+        if (trimmed.isEmpty())
+            continue;
+        QRegularExpression re(trimmed, QRegularExpression::CaseInsensitiveOption);
+        if (re.isValid())
+            m_ignorePatterns.append(re);   // silently skip a malformed pattern
+    }
+}
+
+QList<Track> PlayerController::filterIncoming(const QList<Track> &tracks, int *focus) const
+{
+    // Ignore filter first (fewer tracks for the quality collapse to walk), then
+    // Prefer-HQ. Both passes thread *focus through so the protected row survives.
+    QList<Track> out = applyIgnore(tracks, m_ignorePatterns, focus);
+    return applyPreferHq(out, m_preferHq, focus);
 }
 
 void PlayerController::setReadyQueue(const QList<Track> &tracks)
@@ -396,7 +455,7 @@ void PlayerController::play()
     if (m_queue.isEmpty()) {
         if (m_readyQueue.isEmpty())
             return;
-        m_queue = applyPreferHq(m_readyQueue, m_preferHq);
+        m_queue = filterIncoming(m_readyQueue);
         emit queueChanged(m_queue);
     }
     playInternal(0);

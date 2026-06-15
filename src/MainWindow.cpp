@@ -1399,8 +1399,11 @@ void MainWindow::openSettings(bool startOnLibrary)
     s.setValue("ytdlp/path", dlg.ytDlpPath());
     s.setValue("audio/outputDevice", dlg.audioDeviceId());
     m_controller->setAudioDevice(dlg.audioDeviceId());
-    // Prefer-HQ is persisted self-contained by the dialog; push the new value through.
+    // Prefer-HQ and ignore-titles are persisted self-contained by the dialog; push
+    // the new values through (they affect future enqueues).
     m_controller->setPreferHq(QSettings().value("playback/preferHq", 0).toInt());
+    m_controller->setIgnorePatterns(
+        QSettings().value("playback/ignoreTitles").toStringList());
     s.setValue("ui/theme", Theme::modeToString(dlg.themeMode()));
     s.setValue("ui/themeFile", dlg.themeFile());
     Theme::apply(dlg.themeMode(), dlg.themeFile());
@@ -1541,6 +1544,7 @@ void MainWindow::restoreSettings()
     // the OS. The engine caches it and applies once its QAudioOutput is up.
     m_controller->setAudioDevice(s.value("audio/outputDevice").toByteArray());
     m_controller->setPreferHq(s.value("playback/preferHq", 0).toInt());
+    m_controller->setIgnorePatterns(s.value("playback/ignoreTitles").toStringList());
 
     const bool shuffle = s.value("playback/shuffle", false).toBool();
     m_shuffleBtn->setChecked(shuffle);             // emits toggled -> controller

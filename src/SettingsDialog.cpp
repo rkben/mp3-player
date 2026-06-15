@@ -161,6 +161,14 @@ SettingsDialog::SettingsDialog(QList<LibraryFolder> folders, bool autoSync,
         s.setValue(QStringLiteral("ytdlp/useManaged"), m_ytUseManaged->isChecked());
         s.setValue(QStringLiteral("playback/preferHq"),
                    m_preferHqCombo->currentData().toInt());
+        // Split into lines, dropping blanks/whitespace-only entries.
+        const QStringList patterns = m_ignoreTitles->toPlainText().split(
+            QLatin1Char('\n'), Qt::SkipEmptyParts);
+        QStringList cleaned;
+        for (const QString &p : patterns)
+            if (!p.trimmed().isEmpty())
+                cleaned.append(p.trimmed());
+        s.setValue(QStringLiteral("playback/ignoreTitles"), cleaned);
 #ifdef HAVE_VISUALIZER
         s.setValue(QStringLiteral("ui/visualizer"), m_visualizer->isChecked());
         s.setValue(QStringLiteral("ui/visualizerShader"),
@@ -344,6 +352,28 @@ QWidget *SettingsDialog::buildGeneralTab()
         hqHint->setFont(f);
     }
     audioForm->addRow(hqHint);
+
+    // Ignore-by-title (one regex per line). Self-contained via QSettings; matched
+    // case-insensitively against the track title when a set is enqueued.
+    m_ignoreTitles = new QPlainTextEdit;
+    m_ignoreTitles->setPlainText(
+        QSettings().value(QStringLiteral("playback/ignoreTitles"))
+            .toStringList().join(QLatin1Char('\n')));
+    m_ignoreTitles->setPlaceholderText(
+        tr("One pattern per line, e.g.\n^intro$\n\\[skit\\]\n(?i)hidden track"));
+    m_ignoreTitles->setMaximumHeight(96);
+    audioForm->addRow(tr("Ignore titles:"), m_ignoreTitles);
+    auto *ignoreHint = new QLabel(tr("Tracks whose title matches one of these regular "
+                                     "expressions are kept out of the play queue. "
+                                     "Matched case-insensitively; invalid patterns are "
+                                     "ignored."));
+    ignoreHint->setWordWrap(true);
+    {
+        QFont f = ignoreHint->font();
+        f.setPointSize(qMax(1, f.pointSize() - 1));
+        ignoreHint->setFont(f);
+    }
+    audioForm->addRow(ignoreHint);
     layout->addWidget(audioBox);
 
 #ifdef HAVE_VISUALIZER

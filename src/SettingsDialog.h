@@ -103,6 +103,7 @@ private:
     QString m_savedYtOverride;   // the explicit ytdlp/path override at open ("" = none)
     QComboBox *m_audioCombo;
     QComboBox *m_preferHqCombo = nullptr;   // self-contained: persists to QSettings
+    QPlainTextEdit *m_ignoreTitles = nullptr;   // self-contained: playback/ignoreTitles
 #ifdef HAVE_VISUALIZER
     QCheckBox *m_visualizer = nullptr;         // self-contained: ui/visualizer
     QComboBox *m_visualizerShader = nullptr;   // self-contained: ui/visualizerShader

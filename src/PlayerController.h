@@ -4,7 +4,9 @@
 #include <QMediaPlayer>
 #include <QMediaMetaData>
 #include <QList>
+#include <QRegularExpression>
 #include <QUrl>
+#include <QVector>
 
 #include "PlaylistModel.h"   // Track
 
@@ -83,6 +85,10 @@ public slots:
     // Prefer-HQ dedup mode applied when a set is enqueued: 0=off, 1=naive (format),
     // 2=naive + bitrate tiebreak. Cached; affects future enqueues only.
     void setPreferHq(int mode) { m_preferHq = mode; }
+    // Regex patterns (one per entry) whose match against a track *title* keeps that
+    // track out of the queue when a set is enqueued. Compiled case-insensitively;
+    // invalid patterns are skipped. Cached; affects future enqueues only.
+    void setIgnorePatterns(const QStringList &patterns);
     // Update the current track's cover art (resolved asynchronously elsewhere).
     void setCurrentArt(const QUrl &url, const QString &artUrl);
     // Enable/disable the audio-buffer capture that feeds the visualizer. Off
@@ -137,6 +143,10 @@ private:
     void recordHistory(int qindex);  // push onto the back/forward history
     void decideAutoNext();           // cache the index end-of-track will advance to
     void maybePrefetch();            // resolve the next remote stream URL ahead of time
+    // Common enqueue filter: drop ignored titles, then collapse Prefer-HQ duplicates.
+    // Shared by every path that admits tracks into the queue; remaps *focus through
+    // both passes (the protected index is never dropped by the ignore filter).
+    QList<Track> filterIncoming(const QList<Track> &tracks, int *focus = nullptr) const;
 
     QThread *m_engineThread;
     MediaEngine *m_engine;
@@ -159,6 +169,7 @@ private:
     bool m_shuffle = false;
     int m_consecutiveErrors = 0;   // guards against an all-bad queue looping
     int m_preferHq = 0;            // Prefer-HQ dedup mode (0=off/1=naive/2=bitrate)
+    QVector<QRegularExpression> m_ignorePatterns;   // compiled title-ignore filters
     QUrl m_lastErrorUrl;           // dedupe: error + InvalidMedia fire together (by track)
     QUrl m_metaResolvedUrl;        // dedupe: metaDataChanged fires repeatedly (by track)
 };
